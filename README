@@ -1,0 +1,83 @@
+This is the README file for ellspmv, a program for benchmarking sparse
+marix-vector multiplication (SpMV) for matrices in ELLPACK format.
+
+  Copyright (C) 2022 James D. Trotter
+
+  Copying and distribution of this file, with or without modification,
+  are permitted in any medium without royalty provided the copyright
+  notice and this notice are preserved.
+
+Building
+--------
+
+The ellspmv program can be built with `make'. Compilation and linking
+may be configured through the environment variable `CC', which is used
+to choose a compiler, and `CFLAGS' and `LDFLAGS', which are used to
+set compiler flags and linker flags, respectively. Here is an example:
+
+     make CC=gcc CFLAGS="-O3 -march=native"
+
+Usage
+-----
+
+ellspmv is used to load a matrix from a file in Matrix Market format
+(see https://math.nist.gov/MatrixMarket/formats.html), convert it to
+ELLPACK representation, and multiply it with a dense vector where
+every element is set to one.
+
+Since OpenMP is used for shared-memory parallel computations, the
+environment variable `OMP_NUM_THREADS' can be set to control the
+number of threads that are used. In addition, `OMP_PROC_BIND' can be
+set to bind threads to particular cores.
+
+If the option `--verbose' is supplied, then some information about the
+matrix is printed, as well as the information about the matrix-vector
+multiplication, such as the time spent and number of arithmetic
+operations performed.
+
+Here is an example from a dual socket Intel Xeon Gold 6130 CPU system,
+where AVX-512 is used for vectorisation. First, we compile the code
+with GCC 11.2.0. Using the option `-fopt-info-vec', we get some extra
+information that shows where vectorization is applied:
+
+	    $ make CC=gcc-11 CFLAGS="-march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp -DWITH_OPENMP"
+	    gcc-11 -c -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp -DWITH_OPENMP ellspmv.c -o ellspmv.o
+	    ellspmv.c:773:44: optimized: loop vectorized using 64 byte vectors
+	    ellspmv.c:773:44: optimized: loop vectorized using 32 byte vectors
+	    ellspmv.c:548:14: optimized: loop vectorized using 64 byte vectors
+	    ellspmv.c:548:14: optimized: loop vectorized using 32 byte vectors
+	    ellspmv.c:525:27: optimized: loop vectorized using 64 byte vectors
+	    ellspmv.c:525:27: optimized: loop vectorized using 32 byte vectors
+	    ellspmv.c:501:35: optimized: loop vectorized using 64 byte vectors
+	    ellspmv.c:501:35: optimized: loop vectorized using 32 byte vectors
+	    ellspmv.c:710:13: optimized: basic block part vectorized using 64 byte vectors
+	    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
+	    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
+	    ellspmv.c:791:13: optimized: basic block part vectorized using 64 byte vectors
+	    gcc-11 -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp -DWITH_OPENMP ellspmv.o  -o ellspmv
+
+Next, we test the matrix-vector multiplication on a large matrix with
+16 nonzeros per row. With standard OpenMP environment variables, we
+use 32 threads and pin each thread to its own CPU core:
+
+    $ OMP_PROC_BIND=true OMP_PLACES=cores OMP_NUM_THREADS=32 ./ellspmv --repeat=10 --verbose Lynx68_reordered/Lynx68_reordered.mtx
+    mtxfile_read: 32.034946 seconds (99.7 MB/s)
+    ell_from_coo: 0.772920 seconds, 6,810,586 rows, 115,779,962 nonzeros, 16 nonzeros per row
+    gemv16: 0.011727 seconds (9.5 Gnz/s, 19.7 Gflop/s, 125.4 GB/s)
+    gemv16: 0.009932 seconds (11.2 Gnz/s, 23.3 Gflop/s, 148.1 GB/s)
+    gemv16: 0.009946 seconds (11.2 Gnz/s, 23.3 Gflop/s, 147.9 GB/s)
+    gemv16: 0.010174 seconds (11.0 Gnz/s, 22.8 Gflop/s, 144.6 GB/s)
+    gemv16: 0.009940 seconds (11.2 Gnz/s, 23.3 Gflop/s, 148.0 GB/s)
+    gemv16: 0.009886 seconds (11.3 Gnz/s, 23.4 Gflop/s, 148.8 GB/s)
+    gemv16: 0.009950 seconds (11.2 Gnz/s, 23.3 Gflop/s, 147.9 GB/s)
+    gemv16: 0.009953 seconds (11.2 Gnz/s, 23.3 Gflop/s, 147.8 GB/s)
+    gemv16: 0.010049 seconds (11.1 Gnz/s, 23.0 Gflop/s, 146.4 GB/s)
+    gemv16: 0.010111 seconds (11.0 Gnz/s, 22.9 Gflop/s, 145.5 GB/s)
+
+The matrix-vector multiplication kernel achieves a throughput of about
+148 GB/s, which is about 58% of the 256 GB/s theoretical memory
+bandwidth of this system.
+
+Copying
+-------
+ellspmv is free software. See the file COPYING for copying conditions.
