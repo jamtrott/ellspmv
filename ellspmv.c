@@ -17,7 +17,7 @@
  * <https://www.gnu.org/licenses/>.
  *
  * Authors: James D. Trotter <james@simula.no>
- * Last modified: 2022-05-13
+ * Last modified: 2022-05-27
  *
  * Benchmarking program for sparse matrix-vector multiplication (SpMV)
  * with matrices in ELLPACK format.
@@ -193,6 +193,37 @@ int parse_int(
 }
 
 /**
+ * ‘parse_int64_t()’ parses a string to produce a number that may be
+ * represented as a signed, 64-bit integer.
+ *
+ * The number is parsed using ‘strtoll()’, following the conventions
+ * documented in the man page for that function.  In addition, some
+ * further error checking is performed to ensure that the number is
+ * parsed correctly.  The parsed number is stored in ‘x’.
+ *
+ * If ‘endptr’ is not ‘NULL’, the address stored in ‘endptr’ points to
+ * the first character beyond the characters that were consumed during
+ * parsing.
+ *
+ * On success, ‘0’ is returned. Otherwise, if the input contained
+ * invalid characters, ‘EINVAL’ is returned. If the resulting number
+ * cannot be represented as a signed integer, ‘ERANGE’ is returned.
+ */
+int parse_int64_t(
+    int64_t * x,
+    const char * s,
+    char ** endptr,
+    int64_t * bytes_read)
+{
+    long long int y;
+    int err = parse_long_long_int(s, endptr, 10, &y, bytes_read);
+    if (err) return err;
+    if (y < INT64_MIN || y > INT64_MAX) return ERANGE;
+    *x = y;
+    return 0;
+}
+
+/**
  * ‘parse_double()’ parses a string to produce a number that may be
  * represented as ‘double’.
  *
@@ -337,7 +368,7 @@ static int freadline(char * linebuf, size_t line_max, FILE * f) {
 static int mtxfile_fread_header(
     int * num_rows,
     int * num_columns,
-    int * num_nonzeros,
+    int64_t * num_nonzeros,
     FILE * f,
     int64_t * lines_read,
     int64_t * bytes_read)
@@ -396,7 +427,7 @@ static int mtxfile_fread_header(
     if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
     if (bytes_read) (*bytes_read)++;
     s = t+1;
-    err = parse_int(num_nonzeros, s, &t, bytes_read);
+    err = parse_int64_t(num_nonzeros, s, &t, bytes_read);
     if (err) { free(linebuf); return err; }
     if (s == t) { free(linebuf); return EINVAL; }
     free(linebuf);
@@ -406,7 +437,7 @@ static int mtxfile_fread_header(
 static int mtxfile_fread_data(
     int num_rows,
     int num_columns,
-    int num_nonzeros,
+    int64_t num_nonzeros,
     int * rowidx,
     int * colidx,
     double * a,
@@ -417,7 +448,7 @@ static int mtxfile_fread_data(
     int line_max = sysconf(_SC_LINE_MAX);
     char * linebuf = malloc(line_max+1);
     if (!linebuf) return errno;
-    for (int i = 0; i < num_nonzeros; i++) {
+    for (int64_t i = 0; i < num_nonzeros; i++) {
         int err = freadline(linebuf, line_max, f);
         if (err) { free(linebuf); return err; }
         char * s = linebuf;
@@ -443,18 +474,18 @@ static int mtxfile_fread_data(
 static int ell_from_coo_size(
     int num_rows,
     int num_columns,
-    int num_nonzeros,
+    int64_t num_nonzeros,
     const int * rowidx,
     const int * colidx,
     const double * a,
-    int * rowptr,
-    int * ellsize,
+    int64_t * rowptr,
+    int64_t * ellsize,
     int * rowsize,
     int * diagsize)
 {
     int rowmax = 0;
     for (int i = 0; i <= num_rows; i++) rowptr[i] = 0;
-    for (int k = 0; k < num_nonzeros; k++) {
+    for (int64_t k = 0; k < num_nonzeros; k++) {
         if (rowidx[k] != colidx[k])
             rowptr[rowidx[k]]++;
     }
@@ -471,19 +502,19 @@ static int ell_from_coo_size(
 static int ell_from_coo(
     int num_rows,
     int num_columns,
-    int num_nonzeros,
+    int64_t num_nonzeros,
     const int * rowidx,
     const int * colidx,
     const double * a,
-    int * rowptr,
-    int ellsize,
+    int64_t * rowptr,
+    int64_t ellsize,
     int rowsize,
     int * ellcolidx,
     double * ella,
     double * ellad)
 {
     for (int i = 0; i <= num_rows; i++) rowptr[i] = 0;
-    for (int k = 0; k < num_nonzeros; k++) {
+    for (int64_t k = 0; k < num_nonzeros; k++) {
         if (rowidx[k] == colidx[k]) {
             ellad[rowidx[k]-1] += a[k];
         } else {
@@ -498,7 +529,7 @@ static int ell_from_coo(
 #endif
     for (int i = 0; i < num_rows; i++) {
         int j =  i < num_columns ? i : num_columns-1;
-        for (int l = rowptr[i]; l < rowsize; l++) {
+        for (int64_t l = rowptr[i]; l < rowsize; l++) {
             ellcolidx[i*rowsize+l] = j;
             ella[i*rowsize+l] = 0.0;
         }
@@ -511,7 +542,7 @@ static int ellgemv(
     double * __restrict y,
     int num_columns,
     const double * __restrict x,
-    int ellsize,
+    int64_t ellsize,
     int rowsize,
     const int * __restrict colidx,
     const double * __restrict a,
@@ -534,7 +565,7 @@ static int ellgemv16(
     double * __restrict y,
     int num_columns,
     const double * __restrict x,
-    int ellsize,
+    int64_t ellsize,
     int rowsize,
     const int * __restrict colidx,
     const double * __restrict a,
@@ -609,7 +640,7 @@ int main(int argc, char *argv[])
 
     int num_rows;
     int num_columns;
-    int num_nonzeros;
+    int64_t num_nonzeros;
     int64_t lines_read = 0;
     int64_t bytes_read = 0;
     err = mtxfile_fread_header(
@@ -677,7 +708,7 @@ int main(int argc, char *argv[])
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
-    int * rowptr = malloc((num_rows+1) * sizeof(int));
+    int64_t * rowptr = malloc((num_rows+1) * sizeof(int64_t));
     if (!rowptr) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -685,7 +716,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int ellsize;
+    int64_t ellsize;
     int rowsize;
     int diagsize;
     err = ell_from_coo_size(
@@ -810,8 +841,8 @@ int main(int argc, char *argv[])
                 break;
         }
 
-        int num_flops = 2*(ellsize+diagsize);
-        int num_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
+        int64_t num_flops = 2*(ellsize+diagsize);
+        int64_t num_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
             + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella) + diagsize*sizeof(*ellad);
 
         #pragma omp master
