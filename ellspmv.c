@@ -548,6 +548,11 @@ static int ellgemv(
     const double * __restrict a,
     const double * __restrict ad)
 {
+#ifdef A64FXCPU
+    #pragma procedure scache_isolate_way L2=L2WAYS
+    #pragma procedure scache_isolate_assign a, colidx
+#endif /* A64FXCPU */
+
 #ifdef WITH_OPENMP
     #pragma omp for simd
 #endif
@@ -571,6 +576,11 @@ static int ellgemv16(
     const double * __restrict a,
     const double * __restrict ad)
 {
+#ifdef A64FXCPU
+    #pragma procedure scache_isolate_way L2=L2WAYS
+    #pragma procedure scache_isolate_assign a, colidx
+#endif /* A64FXCPU */
+
     if (rowsize != 16) return EINVAL;
 #ifdef WITH_OPENMP
     #pragma omp for simd
