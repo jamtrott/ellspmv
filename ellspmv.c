@@ -785,7 +785,7 @@ int main(int argc, char *argv[])
 
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
-        fprintf(stderr, "%'.6f seconds, %'d rows, %'d nonzeros, %'d nonzeros per row\n",
+        fprintf(stderr, "%'.6f seconds, %'d rows, %'"PRId64" nonzeros, %'d nonzeros per row\n",
                 timespec_duration(t0, t1), num_rows, ellsize + num_rows, rowsize);
     }
 
