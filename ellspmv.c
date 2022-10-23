@@ -1,5 +1,5 @@
-/*
- * Benchmark program for ELLPACK SpMV
+/* Benchmark program for ELLPACK SpMV
+ *
  * Copyright (C) 2022 James D. Trotter
  *
  * This program is free software: you can redistribute it and/or
@@ -16,11 +16,23 @@
  * along with this program.  If not, see
  * <https://www.gnu.org/licenses/>.
  *
- * Authors: James D. Trotter <james@simula.no>
- * Last modified: 2022-05-27
- *
  * Benchmarking program for sparse matrix-vector multiplication (SpMV)
  * with matrices in ELLPACK format.
+ *
+ * Authors:
+ *  James D. Trotter <james@simula.no>
+ *  Sergej Breiter <breiter@nm.ifi.lmu.de>
+ *
+ *
+ * History:
+ *
+ *  1.1 — 2022-10-23:
+ *
+ *   - add cache partitioning for A64FX
+ *
+ *  1.0 — 2022-05-16:
+ *
+ *   - initial version
  */
 
 #include <errno.h>
@@ -43,7 +55,7 @@
 #include <time.h>
 
 const char * program_name = "ellspmv";
-const char * program_version = "1.0";
+const char * program_version = "1.1";
 const char * program_copyright =
     "Copyright (C) 2022 James D. Trotter";
 const char * program_license =
@@ -136,6 +148,9 @@ static void program_options_print_version(
     fprintf(f, "%s %s\n", program_name, program_version);
     fprintf(f, "%s\n", program_copyright);
     fprintf(f, "%s\n", program_license);
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+    fprintf(f, "Fujitsu A64FX sector cache support enabled (L2 ways: %d)\n", L2WAYS);
+#endif
 }
 
 /**
@@ -548,10 +563,10 @@ static int ellgemv(
     const double * __restrict a,
     const double * __restrict ad)
 {
-#ifdef A64FXCPU
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     #pragma procedure scache_isolate_way L2=L2WAYS
     #pragma procedure scache_isolate_assign a, colidx
-#endif /* A64FXCPU */
+#endif
 
 #ifdef WITH_OPENMP
     #pragma omp for simd
@@ -576,10 +591,10 @@ static int ellgemv16(
     const double * __restrict a,
     const double * __restrict ad)
 {
-#ifdef A64FXCPU
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     #pragma procedure scache_isolate_way L2=L2WAYS
     #pragma procedure scache_isolate_assign a, colidx
-#endif /* A64FXCPU */
+#endif
 
     if (rowsize != 16) return EINVAL;
 #ifdef WITH_OPENMP
