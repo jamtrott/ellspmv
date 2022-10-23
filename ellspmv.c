@@ -650,8 +650,8 @@ int main(int argc, char *argv[])
 
     /* 2. Read the matrix from a Matrix Market file. */
     if (args.verbose > 0) {
-        fprintf(stdout, "mtxfile_read: ");
-        fflush(stdout);
+        fprintf(stderr, "mtxfile_read: ");
+        fflush(stderr);
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
@@ -728,8 +728,8 @@ int main(int argc, char *argv[])
 
     /* 3. Convert to ELLPACK format. */
     if (args.verbose > 0) {
-        fprintf(stdout, "ell_from_coo: ");
-        fflush(stdout);
+        fprintf(stderr, "ell_from_coo: ");
+        fflush(stderr);
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
@@ -849,8 +849,8 @@ int main(int argc, char *argv[])
     for (int repeat = 0; repeat < args.repeat; repeat++) {
         #pragma omp master
         if (args.verbose > 0) {
-            fprintf(stdout, rowsize == 16 ? "gemv16: " : "gemv: ");
-            fflush(stdout);
+            fprintf(stderr, rowsize == 16 ? "gemv16: " : "gemv: ");
+            fflush(stderr);
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
@@ -873,12 +873,12 @@ int main(int argc, char *argv[])
         #pragma omp master
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
-            fprintf(stdout, "%'.6f seconds (%'.1f Gnz/s, %'.1f Gflop/s, %'.1f GB/s)\n",
+            fprintf(stderr, "%'.6f seconds (%'.1f Gnz/s, %'.1f Gflop/s, %'.1f GB/s)\n",
                     timespec_duration(t0, t1),
                     (double) num_nonzeros * 1e-9 / (double) timespec_duration(t0, t1),
                     (double) num_flops * 1e-9 / (double) timespec_duration(t0, t1),
                     (double) num_bytes * 1e-9 / (double) timespec_duration(t0, t1));
-            fflush(stdout);
+            fflush(stderr);
         }
     }
     if (err) {
@@ -893,8 +893,8 @@ int main(int argc, char *argv[])
     /* 6. write the result vector to a file */
     if (args.ypath && !args.quiet) {
         if (args.verbose > 0) {
-            fprintf(stdout, "mtxfile_write: ");
-            fflush(stdout);
+            fprintf(stderr, "mtxfile_write: ");
+            fflush(stderr);
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
