@@ -25,10 +25,11 @@
 
 #include <errno.h>
 
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
+#include "papi_util/include/papi_util.h"
 #include <unistd.h>
 
 #include <float.h>
@@ -63,7 +64,9 @@ struct program_options
     int repeat;
     int verbose;
     int quiet;
+    struct papi_util_opt papi_opt;
 };
+
 
 /**
  * ‘program_options_init()’ configures the default program options.
@@ -76,6 +79,17 @@ static int program_options_init(
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
+
+    args->papi_opt = (struct papi_util_opt) {
+                            .event_file = NULL,
+                            .print_csv = 0,
+                            .print_threads = 1,
+                            .print_summary = 1,
+                            .print_region = 1,
+                            .component = 0,
+                            .multiplex = 0,
+                            .output = stdout
+                            };
     return 0;
 }
 
@@ -96,7 +110,7 @@ static void program_options_free(
 static void program_options_print_usage(
     FILE * f)
 {
-    fprintf(f, "Usage: %s [OPTION..] A [y]\n", program_name);
+    fprintf(f, "Usage: %s [OPTION..] A [y] [e]\n", program_name);
 }
 
 /**
@@ -115,6 +129,7 @@ static void program_options_print_help(
     fprintf(f, " Positional arguments are:\n");
     fprintf(f, "  A\tpath to Matrix Market file for the matrix A\n");
     fprintf(f, "  y\toptional path for writing the result vector y\n");
+    fprintf(f, "  e\toptional event file for PAPI performance events\n");
     fprintf(f, "\n");
     fprintf(f, " Other options are:\n");
     fprintf(f, "  --repeat=N\t\trepeat matrix-vector multiplication N times\n");
@@ -328,6 +343,8 @@ static int parse_program_options(
         } else if (num_positional_arguments_consumed == 1) {
             args->ypath = strdup(argv[0]);
             if (!args->ypath) { program_options_free(args); return errno; }
+        } else if (num_positional_arguments_consumed == 2) {
+            args->papi_opt.event_file = argv[0];
         } else { program_options_free(args); return EINVAL; }
         num_positional_arguments_consumed++;
         (*nargs)++; argv++;
@@ -524,7 +541,7 @@ static int ell_from_coo(
             rowptr[i]++;
         }
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for
 #endif
     for (int i = 0; i < num_rows; i++) {
@@ -553,7 +570,7 @@ static int ellgemv(
     #pragma procedure scache_isolate_assign a, colidx
 #endif /* A64FXCPU */
 
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (int i = 0; i < num_rows; i++) {
@@ -582,7 +599,7 @@ static int ellgemv16(
 #endif /* A64FXCPU */
 
     if (rowsize != 16) return EINVAL;
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (int i = 0; i < num_rows; i++) {
@@ -647,6 +664,8 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+
+    PAPI_UTIL_SETUP(&args.papi_opt);
 
     int num_rows;
     int num_columns;
@@ -747,7 +766,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (int i = 0; i < num_rows; i++) {
@@ -772,7 +791,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (int i = 0; i < num_rows; i++) {
@@ -795,7 +814,7 @@ int main(int argc, char *argv[])
 
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
-        fprintf(stderr, "%'.6f seconds, %'d rows, %'d nonzeros, %'d nonzeros per row\n",
+        fprintf(stderr, "%'.6f seconds, %'d rows, %'ld nonzeros, %'d nonzeros per row\n",
                 timespec_duration(t0, t1), num_rows, ellsize + num_rows, rowsize);
     }
 
@@ -808,7 +827,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (int j = 0; j < num_columns; j++) x[j] = 1.0;
@@ -822,13 +841,15 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (int i = 0; i < num_rows; i++) y[i] = 0.0;
 
+    PAPI_UTIL_START("ellspmv");
+
     /* 5. compute the matrix-vector multiplication. */
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel
 #endif
     for (int repeat = 0; repeat < args.repeat; repeat++) {
@@ -866,6 +887,11 @@ int main(int argc, char *argv[])
             fflush(stdout);
         }
     }
+    // stop counters
+    PAPI_UTIL_FINISH();
+
+    PAPI_UTIL_FINALIZE();
+
     if (err) {
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
         free(y); free(x);

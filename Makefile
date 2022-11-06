@@ -26,18 +26,37 @@ ellspmv = ellspmv
 all: $(ellspmv)
 clean:
 	rm -f $(ellspmv_c_objects) $(ellspmv)
+	cd papi_util; $(MAKE) clean
 .PHONY: all clean
 
-CFLAGS += -g -Wall
+CFLAGS += -g -Wall 
+#CFLAGS += -Ofast -march=native
+#CFLAGS += -Wextra
 
 ifndef NO_OPENMP
-CFLAGS += -fopenmp -DWITH_OPENMP
+CFLAGS += -fopenmp
 endif
 
-ellspmv_c_sources = ellspmv.c
+ellspmv_c_sources := ellspmv.c
 ellspmv_c_headers =
 ellspmv_c_objects := $(foreach x,$(ellspmv_c_sources),$(x:.c=.o))
+
+# PAPI build
+PAPI_ROOT?=$(shell dirname $(dir $(shell which papi_avail)))
+PAPI_INC?=-I$(PAPI_ROOT)/include
+PAPI_LIB?=-L$(PAPI_ROOT)/lib
+USEPAPI?=0
+
+ifeq (1,$(USEPAPI))
+PAPI_OBJ=papi_util/src/papi_util.o
+LDFLAGS += $(PAPI_LIB) -lpapi
+endif
+CFLAGS += -DPAPI_UTIL_USEPAPI=$(USEPAPI)
+
+$(PAPI_OBJ):
+	cd papi_util; $(MAKE) PAPI_INC=$(PAPI_INC)
+
 $(ellspmv_c_objects): %.o: %.c $(ellspmv_c_headers)
 	$(CC) -c $(CFLAGS) $< -o $@
-$(ellspmv): $(ellspmv_c_objects)
+$(ellspmv): $(ellspmv_c_objects) $(PAPI_OBJ)
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@

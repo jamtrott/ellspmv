@@ -22,4 +22,6 @@ export FLIB_L1_SCCR_CNTL=FALSE
 export XOS_MMM_L_HPAGE_TYPE=hugetlbfs
 
 MATRIX=Lynx68_reordered/Lynx68_reordered.mtx
-./ellspmv -v ${MATRIX} 
+OUTVECTOR=out.mtx
+EVENTFILE=papi_util/perfgroup/a64fx/memdp.txt
+./ellspmv -v ${MATRIX} ${OUTVECTOR} ${EVENTFILE} 
