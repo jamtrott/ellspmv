@@ -76,6 +76,7 @@ const char * program_invocation_short_name;
 struct program_options
 {
     char * Apath;
+    char * xpath;
     char * ypath;
     bool separate_diagonal;
     int repeat;
@@ -90,6 +91,7 @@ static int program_options_init(
     struct program_options * args)
 {
     args->Apath = NULL;
+    args->xpath = NULL;
     args->ypath = NULL;
     args->separate_diagonal = false;
     args->repeat = 1;
@@ -106,6 +108,7 @@ static void program_options_free(
     struct program_options * args)
 {
     if (args->ypath) free(args->ypath);
+    if (args->xpath) free(args->xpath);
     if (args->Apath) free(args->Apath);
 }
 
@@ -115,7 +118,7 @@ static void program_options_free(
 static void program_options_print_usage(
     FILE * f)
 {
-    fprintf(f, "Usage: %s [OPTION..] A [y]\n", program_name);
+    fprintf(f, "Usage: %s [OPTION..] A [x] [y]\n", program_name);
 }
 
 /**
@@ -133,7 +136,8 @@ static void program_options_print_help(
     fprintf(f, "\n");
     fprintf(f, " Positional arguments are:\n");
     fprintf(f, "  A\tpath to Matrix Market file for the matrix A\n");
-    fprintf(f, "  y\toptional path for writing the result vector y\n");
+    fprintf(f, "  x\toptional path to Matrix Market file for the vector x\n");
+    fprintf(f, "  y\toptional path for to Matrix Market file for the vector y\n");
     fprintf(f, "\n");
     fprintf(f, " Other options are:\n");
     fprintf(f, "  --separate-diagonal\t\tstore diagonal nonzeros separately\n");
@@ -354,6 +358,9 @@ static int parse_program_options(
             args->Apath = strdup(argv[0]);
             if (!args->Apath) { program_options_free(args); return errno; }
         } else if (num_positional_arguments_consumed == 1) {
+            args->xpath = strdup(argv[0]);
+            if (!args->xpath) { program_options_free(args); return errno; }
+        } else if (num_positional_arguments_consumed == 2) {
             args->ypath = strdup(argv[0]);
             if (!args->ypath) { program_options_free(args); return errno; }
         } else { program_options_free(args); return EINVAL; }
@@ -393,7 +400,28 @@ static int freadline(char * linebuf, size_t line_max, FILE * f) {
     return 0;
 }
 
+enum mtxobject
+{
+    mtxmatrix,
+    mtxvector,
+};
+
+enum mtxformat
+{
+    mtxarray,
+    mtxcoordinate,
+};
+
+enum mtxsymmetry
+{
+    mtxgeneral,
+    mtxsymmetric,
+};
+
 static int mtxfile_fread_header(
+    enum mtxobject * object,
+    enum mtxformat * format,
+    enum mtxsymmetry * symmetry,
     int * num_rows,
     int * num_columns,
     int64_t * num_nonzeros,
@@ -417,11 +445,19 @@ static int mtxfile_fread_header(
     s = t;
     if (strncmp("matrix ", t, strlen("matrix ")) == 0) {
         t += strlen("matrix ");
+        *object = mtxmatrix;
+    } else if (strncmp("vector ", t, strlen("vector ")) == 0) {
+        t += strlen("vector ");
+        *object = mtxvector;
     } else { free(linebuf); return EINVAL; }
     if (bytes_read) *bytes_read += t-s;
     s = t;
-    if (strncmp("coordinate ", t, strlen("coordinate ")) == 0) {
+    if (strncmp("array ", t, strlen("array ")) == 0) {
+        t += strlen("array ");
+        *format = mtxarray;
+    } else if (strncmp("coordinate ", t, strlen("coordinate ")) == 0) {
         t += strlen("coordinate ");
+        *format = mtxcoordinate;
     } else { free(linebuf); return EINVAL; }
     if (bytes_read) *bytes_read += t-s;
     s = t;
@@ -432,8 +468,10 @@ static int mtxfile_fread_header(
     s = t;
     if (strncmp("general", t, strlen("general")) == 0) {
         t += strlen("general");
+        *symmetry = mtxgeneral;
     } else if (strncmp("symmetric", t, strlen("symmetric")) == 0) {
         t += strlen("symmetric");
+        *symmetry = mtxsymmetric;
     } else { free(linebuf); return EINVAL; }
     if (bytes_read) *bytes_read += t-s;
     s = t;
@@ -447,24 +485,30 @@ static int mtxfile_fread_header(
     } while (linebuf[0] == '%');
 
     /* parse size line */
-    err = parse_int(num_rows, s, &t, bytes_read);
-    if (err) { free(linebuf); return err; }
-    if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
-    if (bytes_read) (*bytes_read)++;
-    s = t+1;
-    err = parse_int(num_columns, s, &t, bytes_read);
-    if (err) { free(linebuf); return err; }
-    if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
-    if (bytes_read) (*bytes_read)++;
-    s = t+1;
-    err = parse_int64_t(num_nonzeros, s, &t, bytes_read);
-    if (err) { free(linebuf); return err; }
-    if (s == t) { free(linebuf); return EINVAL; }
+    if (*object == mtxmatrix && *format == mtxcoordinate) {
+        err = parse_int(num_rows, s, &t, bytes_read);
+        if (err) { free(linebuf); return err; }
+        if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+        if (bytes_read) (*bytes_read)++;
+        s = t+1;
+        err = parse_int(num_columns, s, &t, bytes_read);
+        if (err) { free(linebuf); return err; }
+        if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+        if (bytes_read) (*bytes_read)++;
+        s = t+1;
+        err = parse_int64_t(num_nonzeros, s, &t, bytes_read);
+        if (err) { free(linebuf); return err; }
+        if (s == t) { free(linebuf); return EINVAL; }
+    } else if (*object == mtxvector && *format == mtxarray) {
+        err = parse_int(num_rows, s, &t, bytes_read);
+        if (err) { free(linebuf); return err; }
+        if (s == t) { free(linebuf); return EINVAL; }
+    } else { free(linebuf); return EINVAL; }
     free(linebuf);
     return 0;
 }
 
-static int mtxfile_fread_data(
+static int mtxfile_fread_matrix_coordinate_real(
     int num_rows,
     int num_columns,
     int64_t num_nonzeros,
@@ -494,6 +538,29 @@ static int mtxfile_fread_data(
         if (bytes_read) (*bytes_read)++;
         s = t+1;
         err = parse_double(&a[i], s, &t, bytes_read);
+        if (err) { free(linebuf); return err; }
+        if (s == t) { free(linebuf); return EINVAL; }
+    }
+    free(linebuf);
+    return 0;
+}
+
+static int mtxfile_fread_vector_array_real(
+    int num_rows,
+    double * x,
+    FILE * f,
+    int64_t * lines_read,
+    int64_t * bytes_read)
+{
+    int line_max = sysconf(_SC_LINE_MAX);
+    char * linebuf = malloc(line_max+1);
+    if (!linebuf) return errno;
+    for (int64_t i = 0; i < num_rows; i++) {
+        int err = freadline(linebuf, line_max, f);
+        if (err) { free(linebuf); return err; }
+        char * s = linebuf;
+        char * t = s;
+        err = parse_double(&x[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
     }
@@ -586,7 +653,7 @@ static int ellgemv(
         double yi = 0;
         for (int l = 0; l < rowsize; l++)
             yi += a[i*rowsize+l] * x[colidx[i*rowsize+l]];
-        y[i] = yi;
+        y[i] += yi;
     }
     return 0;
 }
@@ -701,13 +768,18 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    enum mtxobject object;
+    enum mtxformat format;
+    enum mtxsymmetry symmetry;
     int num_rows;
     int num_columns;
     int64_t num_nonzeros;
     int64_t lines_read = 0;
     int64_t bytes_read = 0;
     err = mtxfile_fread_header(
-        &num_rows, &num_columns, &num_nonzeros, f, &lines_read, &bytes_read);
+        &object, &format, &symmetry,
+        &num_rows, &num_columns, &num_nonzeros,
+        f, &lines_read, &bytes_read);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s:%"PRId64": %s\n",
@@ -743,7 +815,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    err = mtxfile_fread_data(
+    err = mtxfile_fread_matrix_coordinate_real(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a, f, &lines_read, &bytes_read);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
@@ -863,9 +935,80 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef WITH_OPENMP
-    #pragma omp parallel for
+#pragma omp parallel for
 #endif
     for (int j = 0; j < num_columns; j++) x[j] = 1.0;
+
+    /* read x vector from a Matrix Market file */
+    if (args.xpath) {
+        if (args.verbose > 0) {
+            fprintf(stderr, "mtxfile_read: ");
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+        }
+
+        FILE * f;
+        if ((f = fopen(args.xpath, "r")) == NULL) {
+            fprintf(stderr, "%s: %s: %s\n",
+                    program_invocation_short_name, args.xpath, strerror(errno));
+            free(x); free(ellad); free(ella); free(ellcolidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        enum mtxobject object;
+        enum mtxformat format;
+        enum mtxsymmetry symmetry;
+        int xnum_rows;
+        int xnum_columns;
+        int64_t xnum_nonzeros;
+        int64_t lines_read = 0;
+        int64_t bytes_read = 0;
+        err = mtxfile_fread_header(
+            &object, &format, &symmetry,
+            &xnum_rows, &xnum_columns, &xnum_nonzeros,
+            f, &lines_read, &bytes_read);
+        if (err) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s:%"PRId64": %s\n",
+                    program_invocation_short_name,
+                    args.xpath, lines_read+1, strerror(err));
+            fclose(f);
+            free(x); free(ellad); free(ella); free(ellcolidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        } else if (object != mtxvector || format != mtxarray || xnum_rows != num_columns) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s:%"PRId64": "
+                    "expected vector in array format of size %d\n",
+                    program_invocation_short_name,
+                    args.xpath, lines_read+1, num_columns);
+            fclose(f);
+            free(x); free(ellad); free(ella); free(ellcolidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        err = mtxfile_fread_vector_array_real(
+            num_rows, x, f, &lines_read, &bytes_read);
+        if (err) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s:%"PRId64": %s\n",
+                    program_invocation_short_name,
+                    args.xpath, lines_read+1, strerror(err));
+            free(x); free(ellad); free(ella); free(ellcolidx);
+            fclose(f);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        if (args.verbose > 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            fprintf(stderr, "%'.6f seconds (%'.1f MB/s)\n",
+                    timespec_duration(t0, t1),
+                    1.0e-6 * bytes_read / timespec_duration(t0, t1));
+        }
+        fclose(f);
+    }
 
     double * y = malloc(num_rows * sizeof(double));
     if (!y) {
@@ -880,6 +1023,77 @@ int main(int argc, char *argv[])
     #pragma omp parallel for
 #endif
     for (int i = 0; i < num_rows; i++) y[i] = 0.0;
+
+    /* read y vector from a Matrix Market file */
+    if (args.ypath) {
+        if (args.verbose > 0) {
+            fprintf(stderr, "mtxfile_read: ");
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+        }
+
+        FILE * f;
+        if ((f = fopen(args.ypath, "r")) == NULL) {
+            fprintf(stderr, "%s: %s: %s\n",
+                    program_invocation_short_name, args.ypath, strerror(errno));
+            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        enum mtxobject object;
+        enum mtxformat format;
+        enum mtxsymmetry symmetry;
+        int ynum_rows;
+        int ynum_columns;
+        int64_t ynum_nonzeros;
+        int64_t lines_read = 0;
+        int64_t bytes_read = 0;
+        err = mtxfile_fread_header(
+            &object, &format, &symmetry,
+            &ynum_rows, &ynum_columns, &ynum_nonzeros,
+            f, &lines_read, &bytes_read);
+        if (err) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s:%"PRId64": %s\n",
+                    program_invocation_short_name,
+                    args.ypath, lines_read+1, strerror(err));
+            fclose(f);
+            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        } else if (object != mtxvector || format != mtxarray || ynum_rows != num_rows) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s:%"PRId64": "
+                    "expected vector in array format of size %d\n",
+                    program_invocation_short_name,
+                    args.ypath, lines_read+1, num_rows);
+            fclose(f);
+            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        err = mtxfile_fread_vector_array_real(
+            num_rows, y, f, &lines_read, &bytes_read);
+        if (err) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s:%"PRId64": %s\n",
+                    program_invocation_short_name,
+                    args.ypath, lines_read+1, strerror(err));
+            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            fclose(f);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        if (args.verbose > 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            fprintf(stderr, "%'.6f seconds (%'.1f MB/s)\n",
+                    timespec_duration(t0, t1),
+                    1.0e-6 * bytes_read / timespec_duration(t0, t1));
+        }
+        fclose(f);
+    }
 
     /* 5. compute the matrix-vector multiplication. */
 #ifdef WITH_OPENMP
@@ -939,25 +1153,15 @@ int main(int argc, char *argv[])
     free(x); free(ellad); free(ella); free(ellcolidx);
 
     /* 6. write the result vector to a file */
-    if (args.ypath && !args.quiet) {
+    if (!args.quiet) {
         if (args.verbose > 0) {
             fprintf(stderr, "mtxfile_write: ");
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        FILE * f = fopen(args.ypath, "w");
-        if (!f) {
-            fprintf(stderr, "%s: %s: %s\n",
-                    program_invocation_short_name, strerror(errno), args.ypath);
-            free(y);
-            program_options_free(&args);
-            return EXIT_FAILURE;
-        }
-
-        fprintf(f, "%%%%MatrixMarket vector array real general\n");
-        fprintf(f, "%d\n", num_rows);
-        for (int i = 0; i < num_rows; i++) fprintf(f, "%.*g\n", DBL_DIG, y[i]);
-        fclose(f);
+        fprintf(stdout, "%%%%MatrixMarket vector array real general\n");
+        fprintf(stdout, "%d\n", num_rows);
+        for (int i = 0; i < num_rows; i++) fprintf(stdout, "%.*g\n", DBL_DIG, y[i]);
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds\n", timespec_duration(t0, t1));
