@@ -14,6 +14,10 @@
 	throughput due to loading entire cache lines at a time rather than
 	single column vector entries.)
 
+2022-08-29 Sergej Breiter <breiter@nm.ifi.lmu.de>
+
+        Add A64FX cache partitioning directives for Fujitsu C compiler.
+
 2022-05-16 James D. Trotter <james@simula.no>
 
         Initial version.
