@@ -1,6 +1,6 @@
 /*
  * Benchmark program for ELLPACK SpMV
- * Copyright (C) 2022 James D. Trotter
+ * Copyright (C) 2023 James D. Trotter
  *
  * This program is free software: you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -17,7 +17,7 @@
  * <https://www.gnu.org/licenses/>.
  *
  * Authors: James D. Trotter <james@simula.no>
- * Last modified: 2022-05-27
+ * Last modified: 2023-02-10
  *
  * Benchmarking program for sparse matrix-vector multiplication (SpMV)
  * with matrices in ELLPACK format.
@@ -43,7 +43,7 @@
 #include <time.h>
 
 const char * program_name = "ellspmv";
-const char * program_version = "1.0";
+const char * program_version = "1.1";
 const char * program_copyright =
     "Copyright (C) 2022 James D. Trotter";
 const char * program_license =
@@ -60,6 +60,7 @@ struct program_options
 {
     char * Apath;
     char * ypath;
+    bool separate_diagonal;
     int repeat;
     int verbose;
     int quiet;
@@ -73,6 +74,7 @@ static int program_options_init(
 {
     args->Apath = NULL;
     args->ypath = NULL;
+    args->separate_diagonal = false;
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
@@ -117,6 +119,7 @@ static void program_options_print_help(
     fprintf(f, "  y\toptional path for writing the result vector y\n");
     fprintf(f, "\n");
     fprintf(f, " Other options are:\n");
+    fprintf(f, "  --separate-diagonal\t\tstore diagonal nonzeros separately\n");
     fprintf(f, "  --repeat=N\t\trepeat matrix-vector multiplication N times\n");
     fprintf(f, "  -q, --quiet\t\tdo not print Matrix Market output\n");
     fprintf(f, "  -v, --verbose\t\tbe more verbose\n");
@@ -276,6 +279,11 @@ static int parse_program_options(
     /* Parse program options. */
     int num_positional_arguments_consumed = 0;
     while (*nargs < argc) {
+        if (strcmp(argv[0], "--separate-diagonal") == 0) {
+            args->separate_diagonal = true;
+            (*nargs)++; argv++; continue;
+        }
+
         if (strcmp(argv[0], "--repeat") == 0) {
             if (argc - *nargs < 2) { program_options_free(args); return EINVAL; }
             (*nargs)++; argv++;
@@ -290,7 +298,7 @@ static int parse_program_options(
         }
 
         if (strcmp(argv[0], "-q") == 0 || strcmp(argv[0], "--quiet") == 0) {
-            args->quiet = true;
+            args->quiet = 1;
             (*nargs)++; argv++; continue;
         }
 
@@ -404,6 +412,8 @@ static int mtxfile_fread_header(
     s = t;
     if (strncmp("general", t, strlen("general")) == 0) {
         t += strlen("general");
+    } else if (strncmp("symmetric", t, strlen("symmetric")) == 0) {
+        t += strlen("symmetric");
     } else { free(linebuf); return EINVAL; }
     if (bytes_read) *bytes_read += t-s;
     s = t;
@@ -481,12 +491,13 @@ static int ell_from_coo_size(
     int64_t * rowptr,
     int64_t * ellsize,
     int * rowsize,
-    int * diagsize)
+    int * diagsize,
+    bool separate_diagonal)
 {
     int rowmax = 0;
     for (int i = 0; i <= num_rows; i++) rowptr[i] = 0;
     for (int64_t k = 0; k < num_nonzeros; k++) {
-        if (rowidx[k] != colidx[k])
+        if (!separate_diagonal || rowidx[k] != colidx[k])
             rowptr[rowidx[k]]++;
     }
     for (int i = 1; i <= num_rows; i++) {
@@ -511,11 +522,12 @@ static int ell_from_coo(
     int rowsize,
     int * ellcolidx,
     double * ella,
-    double * ellad)
+    double * ellad,
+    bool separate_diagonal)
 {
     for (int i = 0; i <= num_rows; i++) rowptr[i] = 0;
     for (int64_t k = 0; k < num_nonzeros; k++) {
-        if (rowidx[k] == colidx[k]) {
+        if (separate_diagonal && rowidx[k] == colidx[k]) {
             ellad[rowidx[k]-1] += a[k];
         } else {
             int i = rowidx[k]-1;
@@ -545,6 +557,28 @@ static int ellgemv(
     int64_t ellsize,
     int rowsize,
     const int * __restrict colidx,
+    const double * __restrict a)
+{
+#ifdef WITH_OPENMP
+    #pragma omp for simd
+#endif
+    for (int i = 0; i < num_rows; i++) {
+        double yi = 0;
+        for (int l = 0; l < rowsize; l++)
+            yi += a[i*rowsize+l] * x[colidx[i*rowsize+l]];
+        y[i] = yi;
+    }
+    return 0;
+}
+
+static int ellgemvsd(
+    int num_rows,
+    double * __restrict y,
+    int num_columns,
+    const double * __restrict x,
+    int64_t ellsize,
+    int rowsize,
+    const int * __restrict colidx,
     const double * __restrict a,
     const double * __restrict ad)
 {
@@ -560,7 +594,7 @@ static int ellgemv(
     return 0;
 }
 
-static int ellgemv16(
+static int ellgemv16sd(
     int num_rows,
     double * __restrict y,
     int num_columns,
@@ -625,8 +659,7 @@ int main(int argc, char *argv[])
 
     /* 2. Read the matrix from a Matrix Market file. */
     if (args.verbose > 0) {
-        fprintf(stdout, "mtxfile_read: ");
-        fflush(stdout);
+        fprintf(stderr, "mtxfile_read: ");
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
@@ -703,8 +736,7 @@ int main(int argc, char *argv[])
 
     /* 3. Convert to ELLPACK format. */
     if (args.verbose > 0) {
-        fprintf(stdout, "ell_from_coo: ");
-        fflush(stdout);
+        fprintf(stderr, "ell_from_coo: ");
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
@@ -721,7 +753,8 @@ int main(int argc, char *argv[])
     int diagsize;
     err = ell_from_coo_size(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
-        rowptr, &ellsize, &rowsize, &diagsize);
+        rowptr, &ellsize, &rowsize, &diagsize,
+        args.separate_diagonal);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
@@ -772,7 +805,8 @@ int main(int argc, char *argv[])
     }
     err = ell_from_coo(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
-        rowptr, ellsize, rowsize, ellcolidx, ella, ellad);
+        rowptr, ellsize, rowsize, ellcolidx, ella, ellad,
+        args.separate_diagonal);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
@@ -824,36 +858,45 @@ int main(int argc, char *argv[])
     for (int repeat = 0; repeat < args.repeat; repeat++) {
         #pragma omp master
         if (args.verbose > 0) {
-            fprintf(stdout, rowsize == 16 ? "gemv16: " : "gemv: ");
-            fflush(stdout);
+            if (args.separate_diagonal && rowsize == 16) fprintf(stderr, "gemv16sd: ");
+            else if (args.separate_diagonal) fprintf(stderr, "gemvsd: ");
+            else fprintf(stderr, "gemv: ");
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        if (rowsize == 16) {
-            err = ellgemv16(
+        if (args.separate_diagonal && rowsize == 16) {
+            err = ellgemv16sd(
+                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
+            if (err)
+                break;
+        } else if (args.separate_diagonal) {
+            err = ellgemvsd(
                 num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
             if (err)
                 break;
         } else {
             err = ellgemv(
-                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
+                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella);
             if (err)
                 break;
         }
 
         int64_t num_flops = 2*(ellsize+diagsize);
-        int64_t num_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
+        int64_t min_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
             + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella) + diagsize*sizeof(*ellad);
+        int64_t max_bytes = num_rows*sizeof(*y) + ellsize*sizeof(*x)
+            + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella)
+            + diagsize*sizeof(*ellad) + diagsize*sizeof(*x);
 
         #pragma omp master
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
-            fprintf(stdout, "%'.6f seconds (%'.1f Gnz/s, %'.1f Gflop/s, %'.1f GB/s)\n",
+            fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",
                     timespec_duration(t0, t1),
                     (double) num_nonzeros * 1e-9 / (double) timespec_duration(t0, t1),
                     (double) num_flops * 1e-9 / (double) timespec_duration(t0, t1),
-                    (double) num_bytes * 1e-9 / (double) timespec_duration(t0, t1));
-            fflush(stdout);
+                    (double) min_bytes * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
         }
     }
     if (err) {
@@ -868,8 +911,7 @@ int main(int argc, char *argv[])
     /* 6. write the result vector to a file */
     if (args.ypath && !args.quiet) {
         if (args.verbose > 0) {
-            fprintf(stdout, "mtxfile_write: ");
-            fflush(stdout);
+            fprintf(stderr, "mtxfile_write: ");
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 

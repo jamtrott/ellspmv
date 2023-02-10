@@ -1,7 +1,23 @@
+2023-02-10  James D. Trotter  <james@simula.no>
+
+	* ellspmv.c: add option for separating diagonal and offdiagonal
+	entries, which is a common trick that may improve SpMV
+	performance.
+
+	also, print a range of throughput, where the minimum is based on
+	loading column vector entries only once, whereas the maximum is
+	based on loading column vector entries every time. (This is a
+	measure of effective throughput and does not account for entire
+	cache lines of column vector entries being loaded and some of
+	those values not being used. The true throughput of data traffic
+	in the memory hierarchy may be even higher than the effective
+	throughput due to loading entire cache lines at a time rather than
+	single column vector entries.)
+
 2022-05-16 James D. Trotter <james@simula.no>
 
         Initial version.
 
-Copyright (C) 2022 James D. Trotter
+Copyright (C) 2023 James D. Trotter
 Copying and distribution of this file, with or without modification, are
 permitted provided the copyright notice and this notice are preserved.
