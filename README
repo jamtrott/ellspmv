@@ -1,7 +1,8 @@
-This is the README file for ellspmv, a program for benchmarking sparse
-marix-vector multiplication (SpMV) for matrices in ELLPACK format.
+This is the README file for csrspmv and ellspmv, programs for
+benchmarking sparse marix-vector multiplication (SpMV) for matrices in
+CSR and ELLPACK format.
 
-  Copyright (C) 2022 James D. Trotter
+  Copyright (C) 2023 James D. Trotter
 
   Copying and distribution of this file, with or without modification,
   are permitted in any medium without royalty provided the copyright
@@ -10,20 +11,23 @@ marix-vector multiplication (SpMV) for matrices in ELLPACK format.
 Building
 --------
 
-The ellspmv program can be built with `make'. Compilation and linking
-may be configured through the environment variable `CC', which is used
-to choose a compiler, and `CFLAGS' and `LDFLAGS', which are used to
-set compiler flags and linker flags, respectively. Here is an example:
+The csrspmv and ellspmv programs can be built with `make'. Compilation
+and linking may be configured through the environment variable `CC',
+which is used to choose a compiler, and `CFLAGS' and `LDFLAGS', which
+are used to set compiler flags and linker flags, respectively. Here is
+an example:
 
      make CC=gcc CFLAGS="-O3 -march=native"
 
 Usage
 -----
 
-ellspmv is used to load a matrix from a file in Matrix Market format
-(see https://math.nist.gov/MatrixMarket/formats.html), convert it to
-ELLPACK representation, and multiply it with a dense vector where
-every element is set to one.
+csrspmv and ellspmv are used to load matrices from files in Matrix
+Market format (see https://math.nist.gov/MatrixMarket/formats.html),
+convert them to CSR or ELLPACK representation, and then multiply them
+with a dense vector. The vector may be loaded from another file in
+Matrix Market format. Otherwise, a vector with every element set to
+one is used.
 
 Since OpenMP is used for shared-memory parallel computations, the
 environment variable `OMP_NUM_THREADS' can be set to control the
@@ -80,4 +84,5 @@ bandwidth of this system.
 
 Copying
 -------
-ellspmv is free software. See the file COPYING for copying conditions.
+csrspmv and ellspmv are free software. See the file COPYING for
+copying conditions.

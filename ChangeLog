@@ -1,3 +1,8 @@
+2023-02-22  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c: add an analogous implementation of matrix-vector
+	multiply for matrices in CSR format.
+
 2023-02-10  James D. Trotter  <james@simula.no>
 
 	* ellspmv.c: add option for separating diagonal and offdiagonal
