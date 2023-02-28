@@ -491,10 +491,12 @@ static int mtxfile_fread_header(
         err = parse_int64_t(num_nonzeros, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
+        if (lines_read) (*lines_read)++;
     } else if (*object == mtxvector && *format == mtxarray) {
         err = parse_int64_t(num_rows, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
+        if (lines_read) (*lines_read)++;
     } else { free(linebuf); return EINVAL; }
     free(linebuf);
     return 0;
@@ -532,6 +534,7 @@ static int mtxfile_fread_matrix_coordinate_real(
         err = parse_double(&a[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
+        if (lines_read) (*lines_read)++;
     }
     free(linebuf);
     return 0;
@@ -555,6 +558,7 @@ static int mtxfile_fread_vector_array_real(
         err = parse_double(&x[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
+        if (lines_read) (*lines_read)++;
     }
     free(linebuf);
     return 0;
