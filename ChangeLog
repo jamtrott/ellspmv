@@ -1,3 +1,7 @@
+2023-02-28  James D. Trotter  <james@simula.no>
+
+	add option for reading gzip-compressed Matrix Market files.
+
 2023-02-22  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c: add an analogous implementation of matrix-vector

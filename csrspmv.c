@@ -27,6 +27,10 @@
  *
  * History:
  *
+ *  1.1 - 2023-02-28:
+ *
+ *   - add option for reading gzip-compressed Matrix Market files
+ *
  *  1.0 — 2023-02-22:
  *
  *   - initial version based on ellspmv.
@@ -36,6 +40,10 @@
 
 #ifdef WITH_OPENMP
 #include <omp.h>
+#endif
+
+#ifdef HAVE_LIBZ
+#include <zlib.h>
 #endif
 
 #include <unistd.h>
@@ -52,7 +60,7 @@
 #include <time.h>
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.0";
+const char * program_version = "1.1";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -70,6 +78,9 @@ struct program_options
     char * Apath;
     char * xpath;
     char * ypath;
+#ifdef HAVE_LIBZ
+    int gzip;
+#endif
     bool separate_diagonal;
     int repeat;
     int verbose;
@@ -85,6 +96,9 @@ static int program_options_init(
     args->Apath = NULL;
     args->xpath = NULL;
     args->ypath = NULL;
+#ifdef HAVE_LIBZ
+    args->gzip = 0;
+#endif
     args->separate_diagonal = false;
     args->repeat = 1;
     args->quiet = 0;
@@ -132,6 +146,9 @@ static void program_options_print_help(
     fprintf(f, "  y\toptional path for to Matrix Market file for the vector y\n");
     fprintf(f, "\n");
     fprintf(f, " Other options are:\n");
+#ifdef HAVE_LIBZ
+    fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
+#endif
     fprintf(f, "  --separate-diagonal\t\tstore diagonal nonzeros separately\n");
     fprintf(f, "  --repeat=N\t\trepeat matrix-vector multiplication N times\n");
     fprintf(f, "  -q, --quiet\t\tdo not print Matrix Market output\n");
@@ -313,6 +330,17 @@ static int parse_program_options(
             (*nargs)++; argv++; continue;
         }
 
+#ifdef HAVE_LIBZ
+        if (strcmp(argv[0], "-z") == 0 ||
+            strcmp(argv[0], "--gzip") == 0 ||
+            strcmp(argv[0], "--gunzip") == 0 ||
+            strcmp(argv[0], "--ungzip") == 0)
+        {
+            args->gzip = 1;
+            (*nargs)++; argv++; continue;
+        }
+#endif
+
         if (strcmp(argv[0], "-q") == 0 || strcmp(argv[0], "--quiet") == 0) {
             args->quiet = 1;
             (*nargs)++; argv++; continue;
@@ -380,16 +408,61 @@ static double timespec_duration(
         (t1.tv_nsec - t0.tv_nsec) * 1e-9;
 }
 
+enum streamtype
+{
+    stream_stdio,
+#ifdef HAVE_LIBZ
+    stream_zlib,
+#endif
+};
+
+union stream
+{
+    FILE * f;
+#ifdef HAVE_LIBZ
+    gzFile gzf;
+#endif
+};
+
+void stream_close(
+    enum streamtype streamtype,
+    union stream s)
+{
+    if (streamtype == stream_stdio) {
+        fclose(s.f);
+#ifdef HAVE_LIBZ
+    } else if (streamtype == stream_zlib) {
+        gzclose(s.gzf);
+#endif
+    }
+}
+
 /**
  * ‘freadline()’ reads a single line from a stream.
  */
-static int freadline(char * linebuf, size_t line_max, FILE * f) {
-    char * s = fgets(linebuf, line_max+1, f);
-    if (!s && feof(f)) return -1;
-    else if (!s) return errno;
-    int n = strlen(s);
-    if (n > 0 && n == line_max && s[n-1] != '\n') return EOVERFLOW;
-    return 0;
+static int freadline(
+    char * linebuf,
+    size_t line_max,
+    enum streamtype streamtype,
+    union stream stream)
+{
+    if (streamtype == stream_stdio) {
+        char * s = fgets(linebuf, line_max+1, stream.f);
+        if (!s && feof(stream.f)) return -1;
+        else if (!s) return errno;
+        int n = strlen(s);
+        if (n > 0 && n == line_max && s[n-1] != '\n') return EOVERFLOW;
+        return 0;
+#ifdef HAVE_LIBZ
+    } else if (streamtype == stream_zlib) {
+        char * s = gzgets(stream.gzf, linebuf, line_max+1);
+        if (!s && gzeof(stream.gzf)) return -1;
+        else if (!s) return errno;
+        int n = strlen(s);
+        if (n > 0 && n == line_max && s[n-1] != '\n') return EOVERFLOW;
+        return 0;
+#endif
+    } else { return EINVAL; }
 }
 
 enum mtxobject
@@ -417,7 +490,8 @@ static int mtxfile_fread_header(
     int64_t * num_rows,
     int64_t * num_columns,
     int64_t * num_nonzeros,
-    FILE * f,
+    enum streamtype streamtype,
+    union stream stream,
     int64_t * lines_read,
     int64_t * bytes_read)
 {
@@ -426,7 +500,7 @@ static int mtxfile_fread_header(
     if (!linebuf) return errno;
 
     /* read and parse header line */
-    int err = freadline(linebuf, line_max, f);
+    int err = freadline(linebuf, line_max, streamtype, stream);
     if (err) { free(linebuf); return err; }
     char * s = linebuf;
     char * t = s;
@@ -471,7 +545,7 @@ static int mtxfile_fread_header(
     /* skip lines starting with '%' */
     do {
         if (lines_read) (*lines_read)++;
-        err = freadline(linebuf, line_max, f);
+        err = freadline(linebuf, line_max, streamtype, stream);
         if (err) { free(linebuf); return err; }
         s = t = linebuf;
     } while (linebuf[0] == '%');
@@ -509,7 +583,8 @@ static int mtxfile_fread_matrix_coordinate_real(
     int64_t * rowidx,
     int64_t * colidx,
     double * a,
-    FILE * f,
+    enum streamtype streamtype,
+    union stream stream,
     int64_t * lines_read,
     int64_t * bytes_read)
 {
@@ -517,7 +592,7 @@ static int mtxfile_fread_matrix_coordinate_real(
     char * linebuf = malloc(line_max+1);
     if (!linebuf) return errno;
     for (int64_t i = 0; i < num_nonzeros; i++) {
-        int err = freadline(linebuf, line_max, f);
+        int err = freadline(linebuf, line_max, streamtype, stream);
         if (err) { free(linebuf); return err; }
         char * s = linebuf;
         char * t = s;
@@ -543,7 +618,8 @@ static int mtxfile_fread_matrix_coordinate_real(
 static int mtxfile_fread_vector_array_real(
     int64_t num_rows,
     double * x,
-    FILE * f,
+    enum streamtype streamtype,
+    union stream stream,
     int64_t * lines_read,
     int64_t * bytes_read)
 {
@@ -551,7 +627,7 @@ static int mtxfile_fread_vector_array_real(
     char * linebuf = malloc(line_max+1);
     if (!linebuf) return errno;
     for (int64_t i = 0; i < num_rows; i++) {
-        int err = freadline(linebuf, line_max, f);
+        int err = freadline(linebuf, line_max, streamtype, stream);
         if (err) { free(linebuf); return err; }
         char * s = linebuf;
         char * t = s;
@@ -731,13 +807,29 @@ int main(int argc, char *argv[])
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
-    FILE * f;
-    if ((f = fopen(args.Apath, "r")) == NULL) {
-        fprintf(stderr, "%s: %s: %s\n",
-                program_invocation_short_name, args.Apath, strerror(errno));
-        program_options_free(&args);
-        return EXIT_FAILURE;
+    enum streamtype streamtype;
+    union stream stream;
+#ifdef HAVE_LIBZ
+    if (!args.gzip) {
+#endif
+        streamtype = stream_stdio;
+        if ((stream.f = fopen(args.Apath, "r")) == NULL) {
+            fprintf(stderr, "%s: %s: %s\n",
+                    program_invocation_short_name, args.Apath, strerror(errno));
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+#ifdef HAVE_LIBZ
+    } else {
+        streamtype = stream_zlib;
+        if ((stream.gzf = gzopen(args.Apath, "r")) == NULL) {
+            fprintf(stderr, "%s: %s: %s\n",
+                    program_invocation_short_name, args.Apath, strerror(errno));
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
     }
+#endif
 
     enum mtxobject object;
     enum mtxformat format;
@@ -750,13 +842,13 @@ int main(int argc, char *argv[])
     err = mtxfile_fread_header(
         &object, &format, &symmetry,
         &num_rows, &num_columns, &num_nonzeros,
-        f, &lines_read, &bytes_read);
+        streamtype, stream, &lines_read, &bytes_read);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                 program_invocation_short_name,
                 args.Apath, lines_read+1, strerror(err));
-        fclose(f);
+        stream_close(streamtype, stream);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
@@ -764,7 +856,7 @@ int main(int argc, char *argv[])
     if (!rowidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        fclose(f);
+        stream_close(streamtype, stream);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
@@ -773,7 +865,7 @@ int main(int argc, char *argv[])
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
         free(rowidx);
-        fclose(f);
+        stream_close(streamtype, stream);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
@@ -782,19 +874,20 @@ int main(int argc, char *argv[])
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
         free(colidx); free(rowidx);
-        fclose(f);
+        stream_close(streamtype, stream);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
     err = mtxfile_fread_matrix_coordinate_real(
-        num_rows, num_columns, num_nonzeros, rowidx, colidx, a, f, &lines_read, &bytes_read);
+        num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
+        streamtype, stream, &lines_read, &bytes_read);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                 program_invocation_short_name,
                 args.Apath, lines_read+1, strerror(err));
         free(a); free(colidx); free(rowidx);
-        fclose(f);
+        stream_close(streamtype, stream);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
@@ -805,7 +898,7 @@ int main(int argc, char *argv[])
                 timespec_duration(t0, t1),
                 1.0e-6 * bytes_read / timespec_duration(t0, t1));
     }
-    fclose(f);
+    stream_close(streamtype, stream);
 
     /* 3. Convert to CSR format. */
     if (args.verbose > 0) {
@@ -912,7 +1005,7 @@ int main(int argc, char *argv[])
             int64_t num_nonzeros = 0;
 #pragma omp for
             for (int i = 0; i < num_rows; i++)
-                num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);           
+                num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
             min_nonzeros_per_thread = num_nonzeros;
             max_nonzeros_per_thread = num_nonzeros;
         }
@@ -943,14 +1036,31 @@ int main(int argc, char *argv[])
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        FILE * f;
-        if ((f = fopen(args.xpath, "r")) == NULL) {
-            fprintf(stderr, "%s: %s: %s\n",
-                    program_invocation_short_name, args.xpath, strerror(errno));
-            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
-            program_options_free(&args);
-            return EXIT_FAILURE;
+        enum streamtype streamtype;
+        union stream stream;
+#ifdef HAVE_LIBZ
+        if (!args.gzip) {
+#endif
+            streamtype = stream_stdio;
+            if ((stream.f = fopen(args.xpath, "r")) == NULL) {
+                fprintf(stderr, "%s: %s: %s\n",
+                        program_invocation_short_name, args.xpath, strerror(errno));
+                free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                program_options_free(&args);
+                return EXIT_FAILURE;
+            }
+#ifdef HAVE_LIBZ
+        } else {
+            streamtype = stream_zlib;
+            if ((stream.gzf = gzopen(args.xpath, "r")) == NULL) {
+                fprintf(stderr, "%s: %s: %s\n",
+                        program_invocation_short_name, args.xpath, strerror(errno));
+                free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                program_options_free(&args);
+                return EXIT_FAILURE;
+            }
         }
+#endif
 
         enum mtxobject object;
         enum mtxformat format;
@@ -963,13 +1073,13 @@ int main(int argc, char *argv[])
         err = mtxfile_fread_header(
             &object, &format, &symmetry,
             &xnum_rows, &xnum_columns, &xnum_nonzeros,
-            f, &lines_read, &bytes_read);
+            streamtype, stream, &lines_read, &bytes_read);
         if (err) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, strerror(err));
-            fclose(f);
+            stream_close(streamtype, stream);
             free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
@@ -979,21 +1089,21 @@ int main(int argc, char *argv[])
                     "expected vector in array format of size %"PRId64"\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, num_columns);
-            fclose(f);
+            stream_close(streamtype, stream);
             free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
 
         err = mtxfile_fread_vector_array_real(
-            num_rows, x, f, &lines_read, &bytes_read);
+            num_rows, x, streamtype, stream, &lines_read, &bytes_read);
         if (err) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, strerror(err));
             free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
-            fclose(f);
+            stream_close(streamtype, stream);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
@@ -1004,7 +1114,7 @@ int main(int argc, char *argv[])
                     timespec_duration(t0, t1),
                     1.0e-6 * bytes_read / timespec_duration(t0, t1));
         }
-        fclose(f);
+        stream_close(streamtype, stream);
     }
 
     double * y = malloc(num_rows * sizeof(double));
@@ -1028,14 +1138,31 @@ int main(int argc, char *argv[])
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        FILE * f;
-        if ((f = fopen(args.ypath, "r")) == NULL) {
-            fprintf(stderr, "%s: %s: %s\n",
-                    program_invocation_short_name, args.ypath, strerror(errno));
-            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
-            program_options_free(&args);
-            return EXIT_FAILURE;
+        enum streamtype streamtype;
+        union stream stream;
+#ifdef HAVE_LIBZ
+        if (!args.gzip) {
+#endif
+            streamtype = stream_stdio;
+            if ((stream.f = fopen(args.ypath, "r")) == NULL) {
+                fprintf(stderr, "%s: %s: %s\n",
+                        program_invocation_short_name, args.ypath, strerror(errno));
+                free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                program_options_free(&args);
+                return EXIT_FAILURE;
+            }
+#ifdef HAVE_LIBZ
+        } else {
+            streamtype = stream_zlib;
+            if ((stream.gzf = gzopen(args.ypath, "r")) == NULL) {
+                fprintf(stderr, "%s: %s: %s\n",
+                        program_invocation_short_name, args.ypath, strerror(errno));
+                free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                program_options_free(&args);
+                return EXIT_FAILURE;
+            }
         }
+#endif
 
         enum mtxobject object;
         enum mtxformat format;
@@ -1048,13 +1175,13 @@ int main(int argc, char *argv[])
         err = mtxfile_fread_header(
             &object, &format, &symmetry,
             &ynum_rows, &ynum_columns, &ynum_nonzeros,
-            f, &lines_read, &bytes_read);
+            streamtype, stream, &lines_read, &bytes_read);
         if (err) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, strerror(err));
-            fclose(f);
+            stream_close(streamtype, stream);
             free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
@@ -1064,21 +1191,21 @@ int main(int argc, char *argv[])
                     "expected vector in array format of size %'"PRId64"\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, num_rows);
-            fclose(f);
+            stream_close(streamtype, stream);
             free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
 
         err = mtxfile_fread_vector_array_real(
-            num_rows, y, f, &lines_read, &bytes_read);
+            num_rows, y, streamtype, stream, &lines_read, &bytes_read);
         if (err) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, strerror(err));
             free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
-            fclose(f);
+            stream_close(streamtype, stream);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
@@ -1089,7 +1216,7 @@ int main(int argc, char *argv[])
                     timespec_duration(t0, t1),
                     1.0e-6 * bytes_read / timespec_duration(t0, t1));
         }
-        fclose(f);
+        stream_close(streamtype, stream);
     }
 
     /* 5. compute the matrix-vector multiplication. */
