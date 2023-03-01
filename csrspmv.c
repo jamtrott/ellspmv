@@ -34,6 +34,13 @@
  *   - add compile-time option for selecting 32- or 64-bit integers
  *     for row/column offsets
  *
+ *   - allow matrices and vectors with integer and pattern fields by
+ *     converting integers to doubles or by setting the double
+ *     precision floating-point matrix/vector values equal to one.
+ *
+ *   - align allocations to page boundaries if HAVE_ALIGNED_ALLOC is
+ *     defined.
+ *
  *  1.0 — 2023-02-22:
  *
  *   - initial version based on ellspmv.
@@ -184,11 +191,14 @@ static void program_options_print_version(
     FILE * f)
 {
     fprintf(f, "%s %s (%d-bit row/column offsets)\n", program_name, program_version, sizeof(idx_t)*CHAR_BIT);
-    fprintf(f, "%s\n", program_copyright);
-    fprintf(f, "%s\n", program_license);
+#ifdef HAVE_ALIGNED_ALLOC
+    fprintf(f, "page-aligned allocations (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+#endif
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     fprintf(f, "Fujitsu A64FX sector cache support enabled (L2 ways: %d)\n", L2WAYS);
 #endif
+    fprintf(f, "%s\n", program_copyright);
+    fprintf(f, "%s\n", program_license);
 }
 
 /**
@@ -525,6 +535,13 @@ enum mtxformat
     mtxcoordinate,
 };
 
+enum mtxfield
+{
+    mtxreal,
+    mtxinteger,
+    mtxpattern,
+};
+
 enum mtxsymmetry
 {
     mtxgeneral,
@@ -534,6 +551,7 @@ enum mtxsymmetry
 static int mtxfile_fread_header(
     enum mtxobject * object,
     enum mtxformat * format,
+    enum mtxfield * field,
     enum mtxsymmetry * symmetry,
     idx_t * num_rows,
     idx_t * num_columns,
@@ -577,6 +595,13 @@ static int mtxfile_fread_header(
     s = t;
     if (strncmp("real ", t, strlen("real ")) == 0) {
         t += strlen("real ");
+        *field = mtxreal;
+    } else if (strncmp("integer ", t, strlen("integer ")) == 0) {
+        t += strlen("integer ");
+        *field = mtxinteger;
+    } else if (strncmp("pattern ", t, strlen("pattern ")) == 0) {
+        t += strlen("pattern ");
+        *field = mtxpattern;
     } else { free(linebuf); return EINVAL; }
     if (bytes_read) *bytes_read += t-s;
     s = t;
@@ -624,7 +649,8 @@ static int mtxfile_fread_header(
     return 0;
 }
 
-static int mtxfile_fread_matrix_coordinate_real(
+static int mtxfile_fread_matrix_coordinate(
+    enum mtxfield field,
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
@@ -639,31 +665,74 @@ static int mtxfile_fread_matrix_coordinate_real(
     int line_max = sysconf(_SC_LINE_MAX);
     char * linebuf = malloc(line_max+1);
     if (!linebuf) return errno;
-    for (int64_t i = 0; i < num_nonzeros; i++) {
-        int err = freadline(linebuf, line_max, streamtype, stream);
-        if (err) { free(linebuf); return err; }
-        char * s = linebuf;
-        char * t = s;
-        err = parse_idx_t(&rowidx[i], s, &t, bytes_read);
-        if (err) { free(linebuf); return err; }
-        if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
-        if (bytes_read) (*bytes_read)++;
-        s = t+1;
-        err = parse_idx_t(&colidx[i], s, &t, bytes_read);
-        if (err) { free(linebuf); return err; }
-        if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
-        if (bytes_read) (*bytes_read)++;
-        s = t+1;
-        err = parse_double(&a[i], s, &t, bytes_read);
-        if (err) { free(linebuf); return err; }
-        if (s == t) { free(linebuf); return EINVAL; }
-        if (lines_read) (*lines_read)++;
-    }
+    if (field == mtxreal || field == mtxinteger) {
+        for (int64_t i = 0; i < num_nonzeros; i++) {
+            int err = freadline(linebuf, line_max, streamtype, stream);
+            if (err) { free(linebuf); return err; }
+            char * s = linebuf;
+            char * t = s;
+            err = parse_idx_t(&rowidx[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+            if (bytes_read) (*bytes_read)++;
+            s = t+1;
+            err = parse_idx_t(&colidx[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+            if (bytes_read) (*bytes_read)++;
+            s = t+1;
+            err = parse_double(&a[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t) { free(linebuf); return EINVAL; }
+            if (lines_read) (*lines_read)++;
+        }
+    } else if (field == mtxinteger) {
+        for (int64_t i = 0; i < num_nonzeros; i++) {
+            int err = freadline(linebuf, line_max, streamtype, stream);
+            if (err) { free(linebuf); return err; }
+            char * s = linebuf;
+            char * t = s;
+            err = parse_idx_t(&rowidx[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+            if (bytes_read) (*bytes_read)++;
+            s = t+1;
+            err = parse_idx_t(&colidx[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+            if (bytes_read) (*bytes_read)++;
+            s = t+1;
+            int x;
+            err = parse_int(&x, s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t) { free(linebuf); return EINVAL; }
+            a[i] = x;
+            if (lines_read) (*lines_read)++;
+        }
+    } else if (field == mtxpattern) {
+        for (int64_t i = 0; i < num_nonzeros; i++) {
+            int err = freadline(linebuf, line_max, streamtype, stream);
+            if (err) { free(linebuf); return err; }
+            char * s = linebuf;
+            char * t = s;
+            err = parse_idx_t(&rowidx[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
+            if (bytes_read) (*bytes_read)++;
+            s = t+1;
+            err = parse_idx_t(&colidx[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t) { free(linebuf); return EINVAL; }
+            a[i] = 1;
+            if (lines_read) (*lines_read)++;
+        }
+    } else { free(linebuf); return EINVAL; }
     free(linebuf);
     return 0;
 }
 
-static int mtxfile_fread_vector_array_real(
+static int mtxfile_fread_vector_array(
+    enum mtxfield field,
     idx_t num_rows,
     double * x,
     enum streamtype streamtype,
@@ -674,16 +743,31 @@ static int mtxfile_fread_vector_array_real(
     int line_max = sysconf(_SC_LINE_MAX);
     char * linebuf = malloc(line_max+1);
     if (!linebuf) return errno;
-    for (idx_t i = 0; i < num_rows; i++) {
-        int err = freadline(linebuf, line_max, streamtype, stream);
-        if (err) { free(linebuf); return err; }
-        char * s = linebuf;
-        char * t = s;
-        err = parse_double(&x[i], s, &t, bytes_read);
-        if (err) { free(linebuf); return err; }
-        if (s == t) { free(linebuf); return EINVAL; }
-        if (lines_read) (*lines_read)++;
-    }
+    if (field == mtxreal) {
+        for (idx_t i = 0; i < num_rows; i++) {
+            int err = freadline(linebuf, line_max, streamtype, stream);
+            if (err) { free(linebuf); return err; }
+            char * s = linebuf;
+            char * t = s;
+            err = parse_double(&x[i], s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t) { free(linebuf); return EINVAL; }
+            if (lines_read) (*lines_read)++;
+        }
+    } else if (field == mtxinteger) {
+        for (idx_t i = 0; i < num_rows; i++) {
+            int err = freadline(linebuf, line_max, streamtype, stream);
+            if (err) { free(linebuf); return err; }
+            char * s = linebuf;
+            char * t = s;
+            int y;
+            err = parse_int(&y, s, &t, bytes_read);
+            if (err) { free(linebuf); return err; }
+            if (s == t) { free(linebuf); return EINVAL; }
+            x[i] = y;
+            if (lines_read) (*lines_read)++;
+        }
+    } else { free(linebuf); return EINVAL; }
     free(linebuf);
     return 0;
 }
@@ -703,7 +787,7 @@ static int csr_from_coo_size(
     bool separate_diagonal)
 {
 #ifdef WITH_OPENMP
-    #pragma omp for
+    #pragma omp parallel for
 #endif
     for (idx_t i = 0; i < num_rows; i++) rowptr[i] = 0;
     rowptr[num_rows] = 0;
@@ -832,6 +916,10 @@ int main(int argc, char *argv[])
     struct timespec t0, t1;
     setlocale(LC_ALL, "");
 
+#ifdef HAVE_ALIGNED_ALLOC
+    long pagesize = sysconf(_SC_PAGESIZE);
+#endif
+
     /* Set program invocation name. */
     program_invocation_name = argv[0];
     program_invocation_short_name = (
@@ -881,6 +969,7 @@ int main(int argc, char *argv[])
 
     enum mtxobject object;
     enum mtxformat format;
+    enum mtxfield field;
     enum mtxsymmetry symmetry;
     idx_t num_rows;
     idx_t num_columns;
@@ -888,7 +977,7 @@ int main(int argc, char *argv[])
     int64_t lines_read = 0;
     int64_t bytes_read = 0;
     err = mtxfile_fread_header(
-        &object, &format, &symmetry,
+        &object, &format, &field, &symmetry,
         &num_rows, &num_columns, &num_nonzeros,
         streamtype, stream, &lines_read, &bytes_read);
     if (err) {
@@ -900,7 +989,11 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+#ifdef HAVE_ALIGNED_ALLOC
+    idx_t * rowidx = aligned_alloc(pagesize, num_nonzeros * sizeof(idx_t));
+#else
     idx_t * rowidx = malloc(num_nonzeros * sizeof(idx_t));
+#endif
     if (!rowidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -908,7 +1001,11 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+#ifdef HAVE_ALIGNED_ALLOC
+    idx_t * colidx = aligned_alloc(pagesize, num_nonzeros * sizeof(idx_t));
+#else
     idx_t * colidx = malloc(num_nonzeros * sizeof(idx_t));
+#endif
     if (!colidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -917,7 +1014,11 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+#ifdef HAVE_ALIGNED_ALLOC
+    double * a = aligned_alloc(pagesize, num_nonzeros * sizeof(double));
+#else
     double * a = malloc(num_nonzeros * sizeof(double));
+#endif
     if (!a) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -926,8 +1027,8 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    err = mtxfile_fread_matrix_coordinate_real(
-        num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
+    err = mtxfile_fread_matrix_coordinate(
+        field, num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         streamtype, stream, &lines_read, &bytes_read);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
@@ -954,7 +1055,11 @@ int main(int argc, char *argv[])
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
+#ifdef HAVE_ALIGNED_ALLOC
+    int64_t * csrrowptr = aligned_alloc(pagesize, (num_rows+1) * sizeof(int64_t));
+#else
     int64_t * csrrowptr = malloc((num_rows+1) * sizeof(int64_t));
+#endif
     if (!csrrowptr) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -976,7 +1081,11 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+#ifdef HAVE_ALIGNED_ALLOC
+    idx_t * csrcolidx = aligned_alloc(pagesize, csrsize * sizeof(idx_t));
+#else
     idx_t * csrcolidx = malloc(csrsize * sizeof(idx_t));
+#endif
     if (!csrcolidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -991,7 +1100,11 @@ int main(int argc, char *argv[])
         for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
             csrcolidx[k] = 0;
     }
+#ifdef HAVE_ALIGNED_ALLOC
+    double * csra = aligned_alloc(pagesize, csrsize * sizeof(double));
+#else
     double * csra = malloc(csrsize * sizeof(double));
+#endif
     if (!csra) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -1000,7 +1113,11 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+#ifdef HAVE_ALIGNED_ALLOC
+    double * csrad = aligned_alloc(pagesize, diagsize * sizeof(double));
+#else
     double * csrad = malloc(diagsize * sizeof(double));
+#endif
     if (!csrad) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -1064,7 +1181,11 @@ int main(int argc, char *argv[])
     }
 
     /* 4. allocate vectors */
+#ifdef HAVE_ALIGNED_ALLOC
+    double * x = aligned_alloc(pagesize, num_columns * sizeof(double));
+#else
     double * x = malloc(num_columns * sizeof(double));
+#endif
     if (!x) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -1112,6 +1233,7 @@ int main(int argc, char *argv[])
 
         enum mtxobject object;
         enum mtxformat format;
+        enum mtxfield field;
         enum mtxsymmetry symmetry;
         idx_t xnum_rows;
         idx_t xnum_columns;
@@ -1119,7 +1241,7 @@ int main(int argc, char *argv[])
         int64_t lines_read = 0;
         int64_t bytes_read = 0;
         err = mtxfile_fread_header(
-            &object, &format, &symmetry,
+            &object, &format, &field, &symmetry,
             &xnum_rows, &xnum_columns, &xnum_nonzeros,
             streamtype, stream, &lines_read, &bytes_read);
         if (err) {
@@ -1143,8 +1265,8 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        err = mtxfile_fread_vector_array_real(
-            num_rows, x, streamtype, stream, &lines_read, &bytes_read);
+        err = mtxfile_fread_vector_array(
+            field, num_rows, x, streamtype, stream, &lines_read, &bytes_read);
         if (err) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
@@ -1165,7 +1287,11 @@ int main(int argc, char *argv[])
         stream_close(streamtype, stream);
     }
 
+#ifdef HAVE_ALIGNED_ALLOC
+    double * y = aligned_alloc(pagesize, num_rows * sizeof(double));
+#else
     double * y = malloc(num_rows * sizeof(double));
+#endif
     if (!y) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -1214,6 +1340,7 @@ int main(int argc, char *argv[])
 
         enum mtxobject object;
         enum mtxformat format;
+        enum mtxfield field;
         enum mtxsymmetry symmetry;
         idx_t ynum_rows;
         idx_t ynum_columns;
@@ -1221,7 +1348,7 @@ int main(int argc, char *argv[])
         int64_t lines_read = 0;
         int64_t bytes_read = 0;
         err = mtxfile_fread_header(
-            &object, &format, &symmetry,
+            &object, &format, &field, &symmetry,
             &ynum_rows, &ynum_columns, &ynum_nonzeros,
             streamtype, stream, &lines_read, &bytes_read);
         if (err) {
@@ -1245,8 +1372,8 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        err = mtxfile_fread_vector_array_real(
-            num_rows, y, streamtype, stream, &lines_read, &bytes_read);
+        err = mtxfile_fread_vector_array(
+            field, num_rows, y, streamtype, stream, &lines_read, &bytes_read);
         if (err) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
