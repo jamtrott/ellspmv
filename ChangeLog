@@ -1,3 +1,9 @@
+2023-03-01  James D. Trotter  <james@simula.no>
+
+	add compile-time options for selecting 32- or 64-bit integers for
+	row/column offsets (i.e., compile with -DIDXTYPEWIDTH=32 or
+	-DIDXTYPEWIDTH=64)
+
 2023-02-28  James D. Trotter  <james@simula.no>
 
 	add option for reading gzip-compressed Matrix Market files.

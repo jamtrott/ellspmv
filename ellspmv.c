@@ -27,9 +27,12 @@
  *
  * History:
  *
- *  1.3 - 2023-02-28:
+ *  1.3 - 2023-03-01:
  *
  *   - add option for reading gzip-compressed Matrix Market files
+ *
+ *   - add compile-time option for selecting 32- or 64-bit integers
+ *     for row/column offsets
  *
  *  1.2 — 2023-02-10:
  *
@@ -66,6 +69,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifndef IDXTYPEWIDTH
+typedef int idx_t;
+#define PRIdx "d"
+#define parse_idx_t parse_int
+#elif IDXTYPEWIDTH == 32
+typedef int32_t idx_t;
+#define PRIdx PRId32
+#define parse_idx_t parse_int32_t
+#elif IDXTYPEWIDTH == 64
+typedef int64_t idx_t;
+#define PRIdx PRId64
+#define parse_idx_t parse_int64_t
+#endif
 
 const char * program_name = "ellspmv";
 const char * program_version = "1.3";
@@ -232,6 +249,37 @@ int parse_int(
     int err = parse_long_long_int(s, endptr, 10, &y, bytes_read);
     if (err) return err;
     if (y < INT_MIN || y > INT_MAX) return ERANGE;
+    *x = y;
+    return 0;
+}
+
+/**
+ * ‘parse_int32_t()’ parses a string to produce a number that may be
+ * represented as a signed, 32-bit integer.
+ *
+ * The number is parsed using ‘strtoll()’, following the conventions
+ * documented in the man page for that function.  In addition, some
+ * further error checking is performed to ensure that the number is
+ * parsed correctly.  The parsed number is stored in ‘x’.
+ *
+ * If ‘endptr’ is not ‘NULL’, the address stored in ‘endptr’ points to
+ * the first character beyond the characters that were consumed during
+ * parsing.
+ *
+ * On success, ‘0’ is returned. Otherwise, if the input contained
+ * invalid characters, ‘EINVAL’ is returned. If the resulting number
+ * cannot be represented as a signed integer, ‘ERANGE’ is returned.
+ */
+int parse_int32_t(
+    int32_t * x,
+    const char * s,
+    char ** endptr,
+    int64_t * bytes_read)
+{
+    long long int y;
+    int err = parse_long_long_int(s, endptr, 10, &y, bytes_read);
+    if (err) return err;
+    if (y < INT32_MIN || y > INT32_MAX) return ERANGE;
     *x = y;
     return 0;
 }
@@ -495,8 +543,8 @@ static int mtxfile_fread_header(
     enum mtxobject * object,
     enum mtxformat * format,
     enum mtxsymmetry * symmetry,
-    int * num_rows,
-    int * num_columns,
+    idx_t * num_rows,
+    idx_t * num_columns,
     int64_t * num_nonzeros,
     enum streamtype streamtype,
     union stream stream,
@@ -560,12 +608,12 @@ static int mtxfile_fread_header(
 
     /* parse size line */
     if (*object == mtxmatrix && *format == mtxcoordinate) {
-        err = parse_int(num_rows, s, &t, bytes_read);
+        err = parse_idx_t(num_rows, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
         s = t+1;
-        err = parse_int(num_columns, s, &t, bytes_read);
+        err = parse_idx_t(num_columns, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
@@ -575,7 +623,7 @@ static int mtxfile_fread_header(
         if (s == t) { free(linebuf); return EINVAL; }
         if (lines_read) (*lines_read)++;
     } else if (*object == mtxvector && *format == mtxarray) {
-        err = parse_int(num_rows, s, &t, bytes_read);
+        err = parse_idx_t(num_rows, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
         if (lines_read) (*lines_read)++;
@@ -585,11 +633,11 @@ static int mtxfile_fread_header(
 }
 
 static int mtxfile_fread_matrix_coordinate_real(
-    int num_rows,
-    int num_columns,
+    idx_t num_rows,
+    idx_t num_columns,
     int64_t num_nonzeros,
-    int * rowidx,
-    int * colidx,
+    idx_t * rowidx,
+    idx_t * colidx,
     double * a,
     enum streamtype streamtype,
     union stream stream,
@@ -604,12 +652,12 @@ static int mtxfile_fread_matrix_coordinate_real(
         if (err) { free(linebuf); return err; }
         char * s = linebuf;
         char * t = s;
-        err = parse_int(&rowidx[i], s, &t, bytes_read);
+        err = parse_idx_t(&rowidx[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
         s = t+1;
-        err = parse_int(&colidx[i], s, &t, bytes_read);
+        err = parse_idx_t(&colidx[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
@@ -624,7 +672,7 @@ static int mtxfile_fread_matrix_coordinate_real(
 }
 
 static int mtxfile_fread_vector_array_real(
-    int num_rows,
+    idx_t num_rows,
     double * x,
     enum streamtype streamtype,
     union stream stream,
@@ -649,25 +697,25 @@ static int mtxfile_fread_vector_array_real(
 }
 
 static int ell_from_coo_size(
-    int num_rows,
-    int num_columns,
+    idx_t num_rows,
+    idx_t num_columns,
     int64_t num_nonzeros,
-    const int * rowidx,
-    const int * colidx,
+    const idx_t * rowidx,
+    const idx_t * colidx,
     const double * a,
     int64_t * rowptr,
     int64_t * ellsize,
-    int * rowsize,
-    int * diagsize,
+    idx_t * rowsize,
+    idx_t * diagsize,
     bool separate_diagonal)
 {
-    int rowmax = 0;
-    for (int i = 0; i <= num_rows; i++) rowptr[i] = 0;
+    idx_t rowmax = 0;
+    for (idx_t i = 0; i <= num_rows; i++) rowptr[i] = 0;
     for (int64_t k = 0; k < num_nonzeros; k++) {
         if (!separate_diagonal || rowidx[k] != colidx[k])
             rowptr[rowidx[k]]++;
     }
-    for (int i = 1; i <= num_rows; i++) {
+    for (idx_t i = 1; i <= num_rows; i++) {
         rowmax = rowmax >= rowptr[i] ? rowmax : rowptr[i];
         rowptr[i] += rowptr[i-1];
     }
@@ -678,26 +726,26 @@ static int ell_from_coo_size(
 }
 
 static int ell_from_coo(
-    int num_rows,
-    int num_columns,
+    idx_t num_rows,
+    idx_t num_columns,
     int64_t num_nonzeros,
-    const int * rowidx,
-    const int * colidx,
+    const idx_t * rowidx,
+    const idx_t * colidx,
     const double * a,
     int64_t * rowptr,
     int64_t ellsize,
-    int rowsize,
-    int * ellcolidx,
+    idx_t rowsize,
+    idx_t * ellcolidx,
     double * ella,
     double * ellad,
     bool separate_diagonal)
 {
-    for (int i = 0; i <= num_rows; i++) rowptr[i] = 0;
+    for (idx_t i = 0; i <= num_rows; i++) rowptr[i] = 0;
     for (int64_t k = 0; k < num_nonzeros; k++) {
         if (separate_diagonal && rowidx[k] == colidx[k]) {
             ellad[rowidx[k]-1] += a[k];
         } else {
-            int i = rowidx[k]-1;
+            idx_t i = rowidx[k]-1;
             ellcolidx[i*rowsize+rowptr[i]] = colidx[k]-1;
             ella[i*rowsize+rowptr[i]] = a[k];
             rowptr[i]++;
@@ -706,8 +754,8 @@ static int ell_from_coo(
 #ifdef WITH_OPENMP
     #pragma omp for
 #endif
-    for (int i = 0; i < num_rows; i++) {
-        int j =  i < num_columns ? i : num_columns-1;
+    for (idx_t i = 0; i < num_rows; i++) {
+        idx_t j =  i < num_columns ? i : num_columns-1;
         for (int64_t l = rowptr[i]; l < rowsize; l++) {
             ellcolidx[i*rowsize+l] = j;
             ella[i*rowsize+l] = 0.0;
@@ -717,21 +765,21 @@ static int ell_from_coo(
 }
 
 static int ellgemv(
-    int num_rows,
+    idx_t num_rows,
     double * __restrict y,
-    int num_columns,
+    idx_t num_columns,
     const double * __restrict x,
     int64_t ellsize,
-    int rowsize,
-    const int * __restrict colidx,
+    idx_t rowsize,
+    const idx_t * __restrict colidx,
     const double * __restrict a)
 {
 #ifdef WITH_OPENMP
     #pragma omp for simd
 #endif
-    for (int i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
-        for (int l = 0; l < rowsize; l++)
+        for (idx_t l = 0; l < rowsize; l++)
             yi += a[i*rowsize+l] * x[colidx[i*rowsize+l]];
         y[i] += yi;
     }
@@ -739,13 +787,13 @@ static int ellgemv(
 }
 
 static int ellgemvsd(
-    int num_rows,
+    idx_t num_rows,
     double * __restrict y,
-    int num_columns,
+    idx_t num_columns,
     const double * __restrict x,
     int64_t ellsize,
-    int rowsize,
-    const int * __restrict colidx,
+    idx_t rowsize,
+    const idx_t * __restrict colidx,
     const double * __restrict a,
     const double * __restrict ad)
 {
@@ -757,9 +805,9 @@ static int ellgemvsd(
 #ifdef WITH_OPENMP
     #pragma omp for simd
 #endif
-    for (int i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
-        for (int l = 0; l < rowsize; l++)
+        for (idx_t l = 0; l < rowsize; l++)
             yi += a[i*rowsize+l] * x[colidx[i*rowsize+l]];
         y[i] += ad[i]*x[i] + yi;
     }
@@ -767,13 +815,13 @@ static int ellgemvsd(
 }
 
 static int ellgemv16sd(
-    int num_rows,
+    idx_t num_rows,
     double * __restrict y,
-    int num_columns,
+    idx_t num_columns,
     const double * __restrict x,
     int64_t ellsize,
-    int rowsize,
-    const int * __restrict colidx,
+    idx_t rowsize,
+    const idx_t * __restrict colidx,
     const double * __restrict a,
     const double * __restrict ad)
 {
@@ -786,7 +834,7 @@ static int ellgemv16sd(
 #ifdef WITH_OPENMP
     #pragma omp for simd
 #endif
-    for (int i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         y[i] += ad[i]*x[i] +
             a[i*16+ 0] * x[colidx[i*16+ 0]] +
             a[i*16+ 1] * x[colidx[i*16+ 1]] +
@@ -867,8 +915,8 @@ int main(int argc, char *argv[])
     enum mtxobject object;
     enum mtxformat format;
     enum mtxsymmetry symmetry;
-    int num_rows;
-    int num_columns;
+    idx_t num_rows;
+    idx_t num_columns;
     int64_t num_nonzeros;
     int64_t lines_read = 0;
     int64_t bytes_read = 0;
@@ -885,7 +933,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int * rowidx = malloc(num_nonzeros * sizeof(int));
+    idx_t * rowidx = malloc(num_nonzeros * sizeof(idx_t));
     if (!rowidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -893,7 +941,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int * colidx = malloc(num_nonzeros * sizeof(int));
+    idx_t * colidx = malloc(num_nonzeros * sizeof(idx_t));
     if (!colidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -948,8 +996,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     int64_t ellsize;
-    int rowsize;
-    int diagsize;
+    idx_t rowsize;
+    idx_t diagsize;
     err = ell_from_coo_size(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         rowptr, &ellsize, &rowsize, &diagsize,
@@ -961,7 +1009,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int * ellcolidx = malloc(ellsize * sizeof(int));
+    idx_t * ellcolidx = malloc(ellsize * sizeof(idx_t));
     if (!ellcolidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -972,8 +1020,8 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
     #pragma omp parallel for
 #endif
-    for (int i = 0; i < num_rows; i++) {
-        for (int l = 0; l < rowsize; l++)
+    for (idx_t i = 0; i < num_rows; i++) {
+        for (idx_t l = 0; l < rowsize; l++)
             ellcolidx[i*rowsize+l] = 0;
     }
     double * ella = malloc(ellsize * sizeof(double));
@@ -997,9 +1045,9 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
     #pragma omp parallel for
 #endif
-    for (int i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         ellad[i] = 0;
-        for (int l = 0; l < rowsize; l++)
+        for (idx_t l = 0; l < rowsize; l++)
             ella[i*rowsize+l] = 0;
     }
     err = ell_from_coo(
@@ -1018,7 +1066,7 @@ int main(int argc, char *argv[])
 
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
-        fprintf(stderr, "%'.6f seconds, %'d rows, %'"PRId64" nonzeros, %'d nonzeros per row\n",
+        fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRId64" nonzeros, %'"PRIdx" nonzeros per row\n",
                 timespec_duration(t0, t1), num_rows, ellsize + num_rows, rowsize);
     }
 
@@ -1034,7 +1082,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
 #pragma omp parallel for
 #endif
-    for (int j = 0; j < num_columns; j++) x[j] = 1.0;
+    for (idx_t j = 0; j < num_columns; j++) x[j] = 1.0;
 
     /* read x vector from a Matrix Market file */
     if (args.xpath) {
@@ -1072,8 +1120,8 @@ int main(int argc, char *argv[])
         enum mtxobject object;
         enum mtxformat format;
         enum mtxsymmetry symmetry;
-        int xnum_rows;
-        int xnum_columns;
+        idx_t xnum_rows;
+        idx_t xnum_columns;
         int64_t xnum_nonzeros;
         int64_t lines_read = 0;
         int64_t bytes_read = 0;
@@ -1093,7 +1141,7 @@ int main(int argc, char *argv[])
         } else if (object != mtxvector || format != mtxarray || xnum_rows != num_columns) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": "
-                    "expected vector in array format of size %d\n",
+                    "expected vector in array format of size %"PRIdx"\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, num_columns);
             stream_close(streamtype, stream);
@@ -1136,7 +1184,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
     #pragma omp parallel for
 #endif
-    for (int i = 0; i < num_rows; i++) y[i] = 0.0;
+    for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
 
     /* read y vector from a Matrix Market file */
     if (args.ypath) {
@@ -1174,8 +1222,8 @@ int main(int argc, char *argv[])
         enum mtxobject object;
         enum mtxformat format;
         enum mtxsymmetry symmetry;
-        int ynum_rows;
-        int ynum_columns;
+        idx_t ynum_rows;
+        idx_t ynum_columns;
         int64_t ynum_nonzeros;
         int64_t lines_read = 0;
         int64_t bytes_read = 0;
@@ -1195,7 +1243,7 @@ int main(int argc, char *argv[])
         } else if (object != mtxvector || format != mtxarray || ynum_rows != num_rows) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": "
-                    "expected vector in array format of size %d\n",
+                    "expected vector in array format of size %"PRIdx"\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, num_rows);
             stream_close(streamtype, stream);
@@ -1291,8 +1339,8 @@ int main(int argc, char *argv[])
         }
 
         fprintf(stdout, "%%%%MatrixMarket vector array real general\n");
-        fprintf(stdout, "%d\n", num_rows);
-        for (int i = 0; i < num_rows; i++) fprintf(stdout, "%.*g\n", DBL_DIG, y[i]);
+        fprintf(stdout, "%"PRIdx"\n", num_rows);
+        for (idx_t i = 0; i < num_rows; i++) fprintf(stdout, "%.*g\n", DBL_DIG, y[i]);
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds\n", timespec_duration(t0, t1));

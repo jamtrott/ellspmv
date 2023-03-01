@@ -27,9 +27,12 @@
  *
  * History:
  *
- *  1.1 - 2023-02-28:
+ *  1.1 - 2023-03-01:
  *
  *   - add option for reading gzip-compressed Matrix Market files
+ *
+ *   - add compile-time option for selecting 32- or 64-bit integers
+ *     for row/column offsets
  *
  *  1.0 — 2023-02-22:
  *
@@ -58,6 +61,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifndef IDXTYPEWIDTH
+typedef int idx_t;
+#define PRIdx "d"
+#define parse_idx_t parse_int
+#elif IDXTYPEWIDTH == 32
+typedef int32_t idx_t;
+#define PRIdx PRId32
+#define parse_idx_t parse_int32_t
+#elif IDXTYPEWIDTH == 64
+typedef int64_t idx_t;
+#define PRIdx PRId64
+#define parse_idx_t parse_int64_t
+#endif
 
 const char * program_name = "csrspmv";
 const char * program_version = "1.1";
@@ -166,7 +183,7 @@ static void program_options_print_help(
 static void program_options_print_version(
     FILE * f)
 {
-    fprintf(f, "%s %s\n", program_name, program_version);
+    fprintf(f, "%s %s (%d-bit row/column offsets)\n", program_name, program_version, sizeof(idx_t)*CHAR_BIT);
     fprintf(f, "%s\n", program_copyright);
     fprintf(f, "%s\n", program_license);
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
@@ -224,6 +241,37 @@ int parse_int(
     int err = parse_long_long_int(s, endptr, 10, &y, bytes_read);
     if (err) return err;
     if (y < INT_MIN || y > INT_MAX) return ERANGE;
+    *x = y;
+    return 0;
+}
+
+/**
+ * ‘parse_int32_t()’ parses a string to produce a number that may be
+ * represented as a signed, 32-bit integer.
+ *
+ * The number is parsed using ‘strtoll()’, following the conventions
+ * documented in the man page for that function.  In addition, some
+ * further error checking is performed to ensure that the number is
+ * parsed correctly.  The parsed number is stored in ‘x’.
+ *
+ * If ‘endptr’ is not ‘NULL’, the address stored in ‘endptr’ points to
+ * the first character beyond the characters that were consumed during
+ * parsing.
+ *
+ * On success, ‘0’ is returned. Otherwise, if the input contained
+ * invalid characters, ‘EINVAL’ is returned. If the resulting number
+ * cannot be represented as a signed integer, ‘ERANGE’ is returned.
+ */
+int parse_int32_t(
+    int32_t * x,
+    const char * s,
+    char ** endptr,
+    int64_t * bytes_read)
+{
+    long long int y;
+    int err = parse_long_long_int(s, endptr, 10, &y, bytes_read);
+    if (err) return err;
+    if (y < INT32_MIN || y > INT32_MAX) return ERANGE;
     *x = y;
     return 0;
 }
@@ -487,8 +535,8 @@ static int mtxfile_fread_header(
     enum mtxobject * object,
     enum mtxformat * format,
     enum mtxsymmetry * symmetry,
-    int64_t * num_rows,
-    int64_t * num_columns,
+    idx_t * num_rows,
+    idx_t * num_columns,
     int64_t * num_nonzeros,
     enum streamtype streamtype,
     union stream stream,
@@ -552,12 +600,12 @@ static int mtxfile_fread_header(
 
     /* parse size line */
     if (*object == mtxmatrix && *format == mtxcoordinate) {
-        err = parse_int64_t(num_rows, s, &t, bytes_read);
+        err = parse_idx_t(num_rows, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
         s = t+1;
-        err = parse_int64_t(num_columns, s, &t, bytes_read);
+        err = parse_idx_t(num_columns, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
@@ -567,7 +615,7 @@ static int mtxfile_fread_header(
         if (s == t) { free(linebuf); return EINVAL; }
         if (lines_read) (*lines_read)++;
     } else if (*object == mtxvector && *format == mtxarray) {
-        err = parse_int64_t(num_rows, s, &t, bytes_read);
+        err = parse_idx_t(num_rows, s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t) { free(linebuf); return EINVAL; }
         if (lines_read) (*lines_read)++;
@@ -577,11 +625,11 @@ static int mtxfile_fread_header(
 }
 
 static int mtxfile_fread_matrix_coordinate_real(
-    int64_t num_rows,
-    int64_t num_columns,
+    idx_t num_rows,
+    idx_t num_columns,
     int64_t num_nonzeros,
-    int64_t * rowidx,
-    int64_t * colidx,
+    idx_t * rowidx,
+    idx_t * colidx,
     double * a,
     enum streamtype streamtype,
     union stream stream,
@@ -596,12 +644,12 @@ static int mtxfile_fread_matrix_coordinate_real(
         if (err) { free(linebuf); return err; }
         char * s = linebuf;
         char * t = s;
-        err = parse_int64_t(&rowidx[i], s, &t, bytes_read);
+        err = parse_idx_t(&rowidx[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
         s = t+1;
-        err = parse_int64_t(&colidx[i], s, &t, bytes_read);
+        err = parse_idx_t(&colidx[i], s, &t, bytes_read);
         if (err) { free(linebuf); return err; }
         if (s == t || *t != ' ') { free(linebuf); return EINVAL; }
         if (bytes_read) (*bytes_read)++;
@@ -616,7 +664,7 @@ static int mtxfile_fread_matrix_coordinate_real(
 }
 
 static int mtxfile_fread_vector_array_real(
-    int64_t num_rows,
+    idx_t num_rows,
     double * x,
     enum streamtype streamtype,
     union stream stream,
@@ -626,7 +674,7 @@ static int mtxfile_fread_vector_array_real(
     int line_max = sysconf(_SC_LINE_MAX);
     char * linebuf = malloc(line_max+1);
     if (!linebuf) return errno;
-    for (int64_t i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         int err = freadline(linebuf, line_max, streamtype, stream);
         if (err) { free(linebuf); return err; }
         char * s = linebuf;
@@ -641,23 +689,23 @@ static int mtxfile_fread_vector_array_real(
 }
 
 static int csr_from_coo_size(
-    int64_t num_rows,
-    int64_t num_columns,
+    idx_t num_rows,
+    idx_t num_columns,
     int64_t num_nonzeros,
-    const int64_t * rowidx,
-    const int64_t * colidx,
+    const idx_t * rowidx,
+    const idx_t * colidx,
     const double * a,
     int64_t * rowptr,
     int64_t * csrsize,
-    int64_t * rowsizemin,
-    int64_t * rowsizemax,
-    int64_t * diagsize,
+    idx_t * rowsizemin,
+    idx_t * rowsizemax,
+    idx_t * diagsize,
     bool separate_diagonal)
 {
 #ifdef WITH_OPENMP
     #pragma omp for
 #endif
-    for (int64_t i = 0; i < num_rows; i++) rowptr[i] = 0;
+    for (idx_t i = 0; i < num_rows; i++) rowptr[i] = 0;
     rowptr[num_rows] = 0;
     if (num_rows == num_columns && separate_diagonal) {
         for (int64_t k = 0; k < num_nonzeros; k++) {
@@ -666,9 +714,9 @@ static int csr_from_coo_size(
     } else {
         for (int64_t k = 0; k < num_nonzeros; k++) rowptr[rowidx[k]]++;
     }
-    int64_t rowmin = num_rows > 0 ? rowptr[1] : 0;
-    int64_t rowmax = 0;
-    for (int64_t i = 1; i <= num_rows; i++) {
+    idx_t rowmin = num_rows > 0 ? rowptr[1] : 0;
+    idx_t rowmax = 0;
+    for (idx_t i = 1; i <= num_rows; i++) {
         rowmin = rowmin <= rowptr[i] ? rowmin : rowptr[i];
         rowmax = rowmax >= rowptr[i] ? rowmax : rowptr[i];
         rowptr[i] += rowptr[i-1];
@@ -682,17 +730,17 @@ static int csr_from_coo_size(
 }
 
 static int csr_from_coo(
-    int64_t num_rows,
-    int64_t num_columns,
+    idx_t num_rows,
+    idx_t num_columns,
     int64_t num_nonzeros,
-    const int64_t * rowidx,
-    const int64_t * colidx,
+    const idx_t * rowidx,
+    const idx_t * colidx,
     const double * a,
     int64_t * rowptr,
     int64_t csrsize,
-    int64_t rowsizemin,
-    int64_t rowsizemax,
-    int64_t * csrcolidx,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    idx_t * csrcolidx,
     double * csra,
     double * csrad,
     bool separate_diagonal)
@@ -702,7 +750,7 @@ static int csr_from_coo(
             if (rowidx[k] == colidx[k]) {
                 csrad[rowidx[k]-1] += a[k];
             } else {
-                int64_t i = rowidx[k]-1;
+                idx_t i = rowidx[k]-1;
                 csrcolidx[rowptr[i]] = colidx[k]-1;
                 csra[rowptr[i]] = a[k];
                 rowptr[i]++;
@@ -710,33 +758,33 @@ static int csr_from_coo(
         }
     } else {
         for (int64_t k = 0; k < num_nonzeros; k++) {
-            int64_t i = rowidx[k]-1;
+            idx_t i = rowidx[k]-1;
             csrcolidx[rowptr[i]] = colidx[k]-1;
             csra[rowptr[i]] = a[k];
             rowptr[i]++;
         }
     }
-    for (int64_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+    for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
     rowptr[0] = 0;
     return 0;
 }
 
 static int csrgemv(
-    int64_t num_rows,
+    idx_t num_rows,
     double * __restrict y,
-    int64_t num_columns,
+    idx_t num_columns,
     const double * __restrict x,
     int64_t csrsize,
-    int64_t rowsizemin,
-    int64_t rowsizemax,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
     const int64_t * __restrict rowptr,
-    const int64_t * __restrict colidx,
+    const idx_t * __restrict colidx,
     const double * __restrict a)
 {
 #ifdef WITH_OPENMP
     #pragma omp for simd
 #endif
-    for (int64_t i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
         for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
             yi += a[k] * x[colidx[k]];
@@ -746,15 +794,15 @@ static int csrgemv(
 }
 
 static int csrgemvsd(
-    int64_t num_rows,
+    idx_t num_rows,
     double * __restrict y,
-    int64_t num_columns,
+    idx_t num_columns,
     const double * __restrict x,
     int64_t csrsize,
-    int64_t rowsizemin,
-    int64_t rowsizemax,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
     const int64_t * __restrict rowptr,
-    const int64_t * __restrict colidx,
+    const idx_t * __restrict colidx,
     const double * __restrict a,
     const double * __restrict ad)
 {
@@ -766,7 +814,7 @@ static int csrgemvsd(
 #ifdef WITH_OPENMP
     #pragma omp for simd
 #endif
-    for (int64_t i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
         for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
             yi += a[k] * x[colidx[k]];
@@ -834,8 +882,8 @@ int main(int argc, char *argv[])
     enum mtxobject object;
     enum mtxformat format;
     enum mtxsymmetry symmetry;
-    int64_t num_rows;
-    int64_t num_columns;
+    idx_t num_rows;
+    idx_t num_columns;
     int64_t num_nonzeros;
     int64_t lines_read = 0;
     int64_t bytes_read = 0;
@@ -852,7 +900,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int64_t * rowidx = malloc(num_nonzeros * sizeof(int64_t));
+    idx_t * rowidx = malloc(num_nonzeros * sizeof(idx_t));
     if (!rowidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -860,7 +908,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int64_t * colidx = malloc(num_nonzeros * sizeof(int64_t));
+    idx_t * colidx = malloc(num_nonzeros * sizeof(idx_t));
     if (!colidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -915,8 +963,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     int64_t csrsize;
-    int64_t rowsizemin, rowsizemax;
-    int64_t diagsize;
+    idx_t rowsizemin, rowsizemax;
+    idx_t diagsize;
     err = csr_from_coo_size(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         csrrowptr, &csrsize, &rowsizemin, &rowsizemax, &diagsize,
@@ -928,7 +976,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int64_t * csrcolidx = malloc(csrsize * sizeof(int64_t));
+    idx_t * csrcolidx = malloc(csrsize * sizeof(idx_t));
     if (!csrcolidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
@@ -939,7 +987,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
     #pragma omp parallel for
 #endif
-    for (int64_t i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
             csrcolidx[k] = 0;
     }
@@ -965,12 +1013,12 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
 #pragma omp parallel for
 #endif
-        for (int64_t i = 0; i < num_rows; i++) csrad[i] = 0;
+        for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
     }
 #ifdef WITH_OPENMP
     #pragma omp parallel for
 #endif
-    for (int64_t i = 0; i < num_rows; i++) {
+    for (idx_t i = 0; i < num_rows; i++) {
         for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
             csra[k] = 0;
     }
@@ -990,12 +1038,12 @@ int main(int argc, char *argv[])
 
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
-        fprintf(stderr, "%'.6f seconds, %'"PRId64" rows, %'"PRId64" columns, %'"PRId64" nonzeros"
-                ", %'"PRId64" to %'"PRId64" nonzeros per row",
+        fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRIdx" columns, %'"PRId64" nonzeros"
+                ", %'"PRIdx" to %'"PRIdx" nonzeros per row",
                 timespec_duration(t0, t1), num_rows, num_columns, csrsize+diagsize, rowsizemin, rowsizemax);
 #ifdef WITH_OPENMP
         int nthreads;
-        int64_t num_rows_per_thread;
+        idx_t num_rows_per_thread;
         int64_t min_nonzeros_per_thread = INT64_MAX;
         int64_t max_nonzeros_per_thread = 0;
 #pragma omp parallel reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
@@ -1009,7 +1057,7 @@ int main(int argc, char *argv[])
             min_nonzeros_per_thread = num_nonzeros;
             max_nonzeros_per_thread = num_nonzeros;
         }
-        fprintf(stderr, ", %'d threads, %'"PRId64" rows per thread, %'"PRId64" to %'"PRId64" nonzeros per thread",
+        fprintf(stderr, ", %'d threads, %'"PRIdx" rows per thread, %'"PRId64" to %'"PRId64" nonzeros per thread",
                 nthreads, num_rows_per_thread, min_nonzeros_per_thread, max_nonzeros_per_thread);
 #endif
         fputc('\n', stderr);
@@ -1027,7 +1075,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
 #pragma omp parallel for
 #endif
-    for (int64_t j = 0; j < num_columns; j++) x[j] = 1.0;
+    for (idx_t j = 0; j < num_columns; j++) x[j] = 1.0;
 
     /* read x vector from a Matrix Market file */
     if (args.xpath) {
@@ -1065,8 +1113,8 @@ int main(int argc, char *argv[])
         enum mtxobject object;
         enum mtxformat format;
         enum mtxsymmetry symmetry;
-        int64_t xnum_rows;
-        int64_t xnum_columns;
+        idx_t xnum_rows;
+        idx_t xnum_columns;
         int64_t xnum_nonzeros;
         int64_t lines_read = 0;
         int64_t bytes_read = 0;
@@ -1086,7 +1134,7 @@ int main(int argc, char *argv[])
         } else if (object != mtxvector || format != mtxarray || xnum_rows != num_columns) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": "
-                    "expected vector in array format of size %"PRId64"\n",
+                    "expected vector in array format of size %"PRIdx"\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, num_columns);
             stream_close(streamtype, stream);
@@ -1129,7 +1177,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_OPENMP
     #pragma omp parallel for
 #endif
-    for (int64_t i = 0; i < num_rows; i++) y[i] = 0.0;
+    for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
 
     /* read y vector from a Matrix Market file */
     if (args.ypath) {
@@ -1167,8 +1215,8 @@ int main(int argc, char *argv[])
         enum mtxobject object;
         enum mtxformat format;
         enum mtxsymmetry symmetry;
-        int64_t ynum_rows;
-        int64_t ynum_columns;
+        idx_t ynum_rows;
+        idx_t ynum_columns;
         int64_t ynum_nonzeros;
         int64_t lines_read = 0;
         int64_t bytes_read = 0;
@@ -1188,7 +1236,7 @@ int main(int argc, char *argv[])
         } else if (object != mtxvector || format != mtxarray || ynum_rows != num_rows) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": "
-                    "expected vector in array format of size %'"PRId64"\n",
+                    "expected vector in array format of size %'"PRIdx"\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, num_rows);
             stream_close(streamtype, stream);
@@ -1279,8 +1327,8 @@ int main(int argc, char *argv[])
         }
 
         fprintf(stdout, "%%%%MatrixMarket vector array real general\n");
-        fprintf(stdout, "%"PRId64"\n", num_rows);
-        for (int64_t i = 0; i < num_rows; i++) fprintf(stdout, "%.*g\n", DBL_DIG, y[i]);
+        fprintf(stdout, "%"PRIdx"\n", num_rows);
+        for (idx_t i = 0; i < num_rows; i++) fprintf(stdout, "%.*g\n", DBL_DIG, y[i]);
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds\n", timespec_duration(t0, t1));
