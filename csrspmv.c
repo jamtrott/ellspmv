@@ -856,16 +856,30 @@ static int csr_from_coo(
                 rowptr[i]++;
             }
         }
+        for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+        rowptr[0] = 0;
     } else {
+        int64_t * __restrict perm = malloc(num_nonzeros * sizeof(int64_t));
+        if (!perm) { return errno; }
+#ifdef WITH_OPENMP
+        #pragma omp parallel for
+#endif
+        for (int64_t k = 0; k < num_nonzeros; k++) perm[k] = 0;
         for (int64_t k = 0; k < num_nonzeros; k++) {
             idx_t i = rowidx[k]-1;
-            csrcolidx[rowptr[i]] = colidx[k]-1;
-            csra[rowptr[i]] = a[k];
-            rowptr[i]++;
+            perm[rowptr[i]++] = k;
         }
+        for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+        rowptr[0] = 0;
+#ifdef WITH_OPENMP
+        #pragma omp parallel for
+#endif
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            csrcolidx[k] = colidx[perm[k]]-1;
+            csra[k] = a[perm[k]];
+        }
+        free(perm);
     }
-    for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
-    rowptr[0] = 0;
     return 0;
 }
 
