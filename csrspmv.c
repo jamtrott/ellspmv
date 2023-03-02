@@ -165,21 +165,21 @@ static void program_options_print_help(
     fprintf(f, " ‘A’ is a matrix, and ‘x’ and ‘y’ are vectors.\n");
     fprintf(f, "\n");
     fprintf(f, " Positional arguments are:\n");
-    fprintf(f, "  A\tpath to Matrix Market file for the matrix A\n");
-    fprintf(f, "  x\toptional path to Matrix Market file for the vector x\n");
-    fprintf(f, "  y\toptional path for to Matrix Market file for the vector y\n");
+    fprintf(f, "  A        path to Matrix Market file for the matrix A\n");
+    fprintf(f, "  x        optional path to Matrix Market file for the vector x\n");
+    fprintf(f, "  y        optional path for to Matrix Market file for the vector y\n");
     fprintf(f, "\n");
     fprintf(f, " Other options are:\n");
 #ifdef HAVE_LIBZ
     fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
 #endif
-    fprintf(f, "  --separate-diagonal\t\tstore diagonal nonzeros separately\n");
-    fprintf(f, "  --repeat=N\t\trepeat matrix-vector multiplication N times\n");
-    fprintf(f, "  -q, --quiet\t\tdo not print Matrix Market output\n");
-    fprintf(f, "  -v, --verbose\t\tbe more verbose\n");
+    fprintf(f, "  --separate-diagonal    store diagonal nonzeros separately\n");
+    fprintf(f, "  --repeat=N             repeat matrix-vector multiplication N times\n");
+    fprintf(f, "  -q, --quiet            do not print Matrix Market output\n");
+    fprintf(f, "  -v, --verbose          be more verbose\n");
     fprintf(f, "\n");
-    fprintf(f, "  -h, --help\t\tdisplay this help and exit\n");
-    fprintf(f, "  --version\t\tdisplay version information and exit\n");
+    fprintf(f, "  -h, --help             display this help and exit\n");
+    fprintf(f, "  --version              display version information and exit\n");
     fprintf(f, "\n");
     fprintf(f, "Report bugs to: <james@simula.no>\n");
 }
@@ -190,13 +190,27 @@ static void program_options_print_help(
 static void program_options_print_version(
     FILE * f)
 {
-    fprintf(f, "%s %s (%d-bit row/column offsets)\n", program_name, program_version, sizeof(idx_t)*CHAR_BIT);
+    fprintf(f, "%s %s\n", program_name, program_version);
+    fprintf(f, "row/column offsets: %d-bit\n", sizeof(idx_t)*CHAR_BIT);
+#ifdef WITH_OPENMP
+    fprintf(f, "OpenMP: yes (%d)\n", _OPENMP);
+#else
+    fprintf(f, "OpenMP: no\n");
+#endif
+#ifdef HAVE_LIBZ
+    fprintf(f, "zlib: yes ("ZLIB_VERSION")\n");
+#else
+    fprintf(f, "zlib: no\n");
+#endif
 #ifdef HAVE_ALIGNED_ALLOC
-    fprintf(f, "page-aligned allocations (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+    fprintf(f, "page-aligned allocations: yes (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+#else
+    fprintf(f, "page-aligned allocations: no\n");
 #endif
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     fprintf(f, "Fujitsu A64FX sector cache support enabled (L2 ways: %d)\n", L2WAYS);
 #endif
+    fprintf(f, "\n");
     fprintf(f, "%s\n", program_copyright);
     fprintf(f, "%s\n", program_license);
 }
@@ -776,15 +790,16 @@ static int csr_from_coo_size(
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
-    const idx_t * rowidx,
-    const idx_t * colidx,
-    const double * a,
-    int64_t * rowptr,
-    int64_t * csrsize,
-    idx_t * rowsizemin,
-    idx_t * rowsizemax,
-    idx_t * diagsize,
-    bool separate_diagonal)
+    const idx_t * __restrict rowidx,
+    const idx_t * __restrict colidx,
+    const double * __restrict a,
+    int64_t * __restrict rowptr,
+    int64_t * __restrict csrsize,
+    idx_t * __restrict rowsizemin,
+    idx_t * __restrict rowsizemax,
+    idx_t * __restrict diagsize,
+    bool separate_diagonal,
+    enum partition partition)
 {
 #ifdef WITH_OPENMP
     #pragma omp parallel for
@@ -817,17 +832,18 @@ static int csr_from_coo(
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
-    const idx_t * rowidx,
-    const idx_t * colidx,
-    const double * a,
-    int64_t * rowptr,
+    const idx_t * __restrict rowidx,
+    const idx_t * __restrict colidx,
+    const double * __restrict a,
+    int64_t * __restrict rowptr,
     int64_t csrsize,
     idx_t rowsizemin,
     idx_t rowsizemax,
-    idx_t * csrcolidx,
-    double * csra,
-    double * csrad,
-    bool separate_diagonal)
+    idx_t * __restrict csrcolidx,
+    double * __restrict csra,
+    double * __restrict csrad,
+    bool separate_diagonal,
+    enum partition partition)
 {
     if (num_rows == num_columns && separate_diagonal) {
         for (int64_t k = 0; k < num_nonzeros; k++) {
