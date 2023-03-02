@@ -1006,7 +1006,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    idx_t * rowidx = aligned_alloc(pagesize, num_nonzeros * sizeof(idx_t));
+    size_t rowidxsize = num_nonzeros*sizeof(idx_t);
+    idx_t * rowidx = aligned_alloc(pagesize, rowidxsize + pagesize - rowidxsize % pagesize);
 #else
     idx_t * rowidx = malloc(num_nonzeros * sizeof(idx_t));
 #endif
@@ -1018,7 +1019,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    idx_t * colidx = aligned_alloc(pagesize, num_nonzeros * sizeof(idx_t));
+    size_t colidxsize = num_nonzeros*sizeof(idx_t);
+    idx_t * colidx = aligned_alloc(pagesize, colidxsize + pagesize - colidxsize % pagesize);
 #else
     idx_t * colidx = malloc(num_nonzeros * sizeof(idx_t));
 #endif
@@ -1031,7 +1033,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    double * a = aligned_alloc(pagesize, num_nonzeros * sizeof(double));
+    size_t asize = num_nonzeros*sizeof(double);
+    double * a = aligned_alloc(pagesize, asize + pagesize - asize % pagesize);
 #else
     double * a = malloc(num_nonzeros * sizeof(double));
 #endif
@@ -1072,7 +1075,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef HAVE_ALIGNED_ALLOC
-    int64_t * csrrowptr = aligned_alloc(pagesize, (num_rows+1) * sizeof(int64_t));
+    size_t csrrowptrsize = (num_rows+1)*sizeof(int64_t);
+    int64_t * csrrowptr = aligned_alloc(pagesize, csrrowptrsize + pagesize - csrrowptrsize % pagesize);
 #else
     int64_t * csrrowptr = malloc((num_rows+1) * sizeof(int64_t));
 #endif
@@ -1098,7 +1102,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    idx_t * csrcolidx = aligned_alloc(pagesize, csrsize * sizeof(idx_t));
+    size_t csrcolidxsize = csrsize*sizeof(idx_t);
+    idx_t * csrcolidx = aligned_alloc(pagesize, csrcolidxsize + pagesize - csrcolidxsize % pagesize);
 #else
     idx_t * csrcolidx = malloc(csrsize * sizeof(idx_t));
 #endif
@@ -1117,7 +1122,8 @@ int main(int argc, char *argv[])
             csrcolidx[k] = 0;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    double * csra = aligned_alloc(pagesize, csrsize * sizeof(double));
+    size_t csrasize = csrsize*sizeof(double);
+    double * csra = aligned_alloc(pagesize, csrasize + pagesize - csrasize % pagesize);
 #else
     double * csra = malloc(csrsize * sizeof(double));
 #endif
@@ -1130,7 +1136,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    double * csrad = aligned_alloc(pagesize, diagsize * sizeof(double));
+    size_t csradsize = diagsize*sizeof(double);
+    double * csrad = aligned_alloc(pagesize, csradsize + pagesize - csradsize % pagesize);
 #else
     double * csrad = malloc(diagsize * sizeof(double));
 #endif
@@ -1198,7 +1205,8 @@ int main(int argc, char *argv[])
 
     /* 4. allocate vectors */
 #ifdef HAVE_ALIGNED_ALLOC
-    double * x = aligned_alloc(pagesize, num_columns * sizeof(double));
+    size_t xsize = num_columns*sizeof(double);
+    double * x = aligned_alloc(pagesize, xsize + pagesize - xsize % pagesize);
 #else
     double * x = malloc(num_columns * sizeof(double));
 #endif
@@ -1304,7 +1312,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef HAVE_ALIGNED_ALLOC
-    double * y = aligned_alloc(pagesize, num_rows * sizeof(double));
+    size_t ysize = num_rows*sizeof(double);
+    double * y = aligned_alloc(pagesize, ysize + pagesize - ysize % pagesize);
 #else
     double * y = malloc(num_rows * sizeof(double));
 #endif

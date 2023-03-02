@@ -198,13 +198,27 @@ static void program_options_print_help(
 static void program_options_print_version(
     FILE * f)
 {
-    fprintf(f, "%s %s (%d-bit row/column offsets)\n", program_name, program_version, sizeof(idx_t)*CHAR_BIT);
+    fprintf(f, "%s %s\n", program_name, program_version);
+    fprintf(f, "row/column offsets: %d-bit\n", sizeof(idx_t)*CHAR_BIT);
+#ifdef WITH_OPENMP
+    fprintf(f, "OpenMP: yes (%d)\n", _OPENMP);
+#else
+    fprintf(f, "OpenMP: no\n");
+#endif
+#ifdef HAVE_LIBZ
+    fprintf(f, "zlib: yes ("ZLIB_VERSION")\n");
+#else
+    fprintf(f, "zlib: no\n");
+#endif
 #ifdef HAVE_ALIGNED_ALLOC
-    fprintf(f, "page-aligned allocations (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+    fprintf(f, "page-aligned allocations: yes (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+#else
+    fprintf(f, "page-aligned allocations: no\n");
 #endif
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     fprintf(f, "Fujitsu A64FX sector cache support enabled (L2 ways: %d)\n", L2WAYS);
 #endif
+    fprintf(f, "\n");
     fprintf(f, "%s\n", program_copyright);
     fprintf(f, "%s\n", program_license);
 }
@@ -1023,7 +1037,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    idx_t * rowidx = aligned_alloc(pagesize, num_nonzeros * sizeof(idx_t));
+    size_t rowidxsize = num_nonzeros*sizeof(idx_t);
+    idx_t * rowidx = aligned_alloc(pagesize, rowidxsize + pagesize - rowidxsize % pagesize);
 #else
     idx_t * rowidx = malloc(num_nonzeros * sizeof(idx_t));
 #endif
@@ -1035,7 +1050,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    idx_t * colidx = aligned_alloc(pagesize, num_nonzeros * sizeof(idx_t));
+    size_t colidxsize = num_nonzeros*sizeof(idx_t);
+    idx_t * colidx = aligned_alloc(pagesize, colidxsize + pagesize - colidxsize % pagesize);
 #else
     idx_t * colidx = malloc(num_nonzeros * sizeof(idx_t));
 #endif
@@ -1048,7 +1064,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    double * a = aligned_alloc(pagesize, num_nonzeros * sizeof(double));
+    size_t asize = num_nonzeros*sizeof(double);
+    double * a = aligned_alloc(pagesize, asize + pagesize - asize % pagesize);
 #else
     double * a = malloc(num_nonzeros * sizeof(double));
 #endif
@@ -1089,7 +1106,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef HAVE_ALIGNED_ALLOC
-    int64_t * rowptr = aligned_alloc(pagesize, (num_rows+1) * sizeof(int64_t));
+    size_t rowptrsize = (num_rows+1)*sizeof(int64_t);
+    int64_t * rowptr = aligned_alloc(pagesize, rowptrsize + pagesize - rowptrsize % pagesize);
 #else
     int64_t * rowptr = malloc((num_rows+1) * sizeof(int64_t));
 #endif
@@ -1115,7 +1133,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    idx_t * ellcolidx = aligned_alloc(pagesize, ellsize * sizeof(idx_t));
+    size_t ellcolidxsize = ellsize*sizeof(idx_t);
+    idx_t * ellcolidx = aligned_alloc(pagesize, ellcolidxsize + pagesize - ellcolidxsize % pagesize);
 #else
     idx_t * ellcolidx = malloc(ellsize * sizeof(idx_t));
 #endif
@@ -1134,7 +1153,8 @@ int main(int argc, char *argv[])
             ellcolidx[i*rowsize+l] = 0;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    double * ella = aligned_alloc(pagesize, ellsize * sizeof(double));
+    size_t ellasize = ellsize*sizeof(double);
+    double * ella = aligned_alloc(pagesize, ellasize + pagesize - ellasize % pagesize);
 #else
     double * ella = malloc(ellsize * sizeof(double));
 #endif
@@ -1147,7 +1167,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    double * ellad = aligned_alloc(pagesize, diagsize * sizeof(double));
+    size_t elladsize = diagsize*sizeof(double);
+    double * ellad = aligned_alloc(pagesize, elladsize + pagesize - elladsize % pagesize);
 #else
     double * ellad = malloc(diagsize * sizeof(double));
 #endif
@@ -1189,7 +1210,8 @@ int main(int argc, char *argv[])
 
     /* 4. allocate vectors */
 #ifdef HAVE_ALIGNED_ALLOC
-    double * x = aligned_alloc(pagesize, num_columns * sizeof(double));
+    size_t xsize = num_columns*sizeof(double);
+    double * x = aligned_alloc(pagesize, xsize + pagesize - xsize % pagesize);
 #else
     double * x = malloc(num_columns * sizeof(double));
 #endif
@@ -1295,7 +1317,8 @@ int main(int argc, char *argv[])
     }
 
 #ifdef HAVE_ALIGNED_ALLOC
-    double * y = aligned_alloc(pagesize, num_rows * sizeof(double));
+    size_t ysize = num_rows*sizeof(double);
+    double * y = aligned_alloc(pagesize, ysize + pagesize - ysize % pagesize);
 #else
     double * y = malloc(num_rows * sizeof(double));
 #endif
