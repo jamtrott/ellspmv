@@ -1,4 +1,4 @@
-2023-03-01  James D. Trotter  <james@simula.no>
+2023-03-02  James D. Trotter  <james@simula.no>
 
 	add compile-time options for selecting 32- or 64-bit integers for
 	row/column offsets (i.e., compile with -DIDXTYPEWIDTH=32 or
@@ -9,7 +9,10 @@
 	precision floating-point matrix/vector values equal to one.
 
 	align allocations to page boundaries if HAVE_ALIGNED_ALLOC is
-	defined.
+	defined
+
+	add a CSR SpMV kernel where nonzeros are partitioned evenly among
+	threads
 
 2023-02-28  James D. Trotter  <james@simula.no>
 

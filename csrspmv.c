@@ -27,7 +27,7 @@
  *
  * History:
  *
- *  1.1 - 2023-03-01:
+ *  1.1 - 2023-03-02:
  *
  *   - add option for reading gzip-compressed Matrix Market files
  *
@@ -40,6 +40,9 @@
  *
  *   - align allocations to page boundaries if HAVE_ALIGNED_ALLOC is
  *     defined.
+ *
+ *   - add a CSR SpMV kernel where nonzeros are partitioned evenly
+ *     among threads
  *
  *  1.0 — 2023-02-22:
  *
@@ -72,14 +75,20 @@
 #ifndef IDXTYPEWIDTH
 typedef int idx_t;
 #define PRIdx "d"
+#define IDX_T_MIN INT_MIN
+#define IDX_T_MAX INT_MAX
 #define parse_idx_t parse_int
 #elif IDXTYPEWIDTH == 32
 typedef int32_t idx_t;
 #define PRIdx PRId32
+#define IDX_T_MIN INT32_MIN
+#define IDX_T_MAX INT32_MAX
 #define parse_idx_t parse_int32_t
 #elif IDXTYPEWIDTH == 64
 typedef int64_t idx_t;
 #define PRIdx PRId64
+#define IDX_T_MIN INT64_MIN
+#define IDX_T_MAX INT64_MAX
 #define parse_idx_t parse_int64_t
 #endif
 
@@ -94,6 +103,12 @@ const char * program_license =
 const char * program_invocation_name;
 const char * program_invocation_short_name;
 
+enum partition
+{
+    partition_rows,
+    partition_nonzeros,
+};
+
 /**
  * ‘program_options’ contains data to related program options.
  */
@@ -106,6 +121,7 @@ struct program_options
     int gzip;
 #endif
     bool separate_diagonal;
+    enum partition partition;
     int repeat;
     int verbose;
     int quiet;
@@ -124,6 +140,7 @@ static int program_options_init(
     args->gzip = 0;
 #endif
     args->separate_diagonal = false;
+    args->partition = partition_rows;
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
@@ -174,6 +191,10 @@ static void program_options_print_help(
     fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
 #endif
     fprintf(f, "  --separate-diagonal    store diagonal nonzeros separately\n");
+#ifdef WITH_OPENMP
+    fprintf(f, "  --partition-rows       partition rows evenly among threads (default)\n");
+    fprintf(f, "  --partition-nonzeros   partition nonzeros evenly among threads\n");
+#endif
     fprintf(f, "  --repeat=N             repeat matrix-vector multiplication N times\n");
     fprintf(f, "  -q, --quiet            do not print Matrix Market output\n");
     fprintf(f, "  -v, --verbose          be more verbose\n");
@@ -386,6 +407,15 @@ static int parse_program_options(
     while (*nargs < argc) {
         if (strcmp(argv[0], "--separate-diagonal") == 0) {
             args->separate_diagonal = true;
+            (*nargs)++; argv++; continue;
+        }
+
+        if (strcmp(argv[0], "--partition-rows") == 0) {
+            args->partition = partition_rows;
+            (*nargs)++; argv++; continue;
+        }
+        if (strcmp(argv[0], "--partition-nonzeros") == 0) {
+            args->partition = partition_nonzeros;
             (*nargs)++; argv++; continue;
         }
 
@@ -937,6 +967,82 @@ static int csrgemvsd(
     return 0;
 }
 
+static int csrgemvnz(
+    idx_t num_rows,
+    double * __restrict y,
+    idx_t num_columns,
+    const double * __restrict x,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    const int64_t * __restrict rowptr,
+    const idx_t * __restrict colidx,
+    const double * __restrict a,
+    idx_t diagsize,
+    const double * __restrict ad)
+{
+#ifdef WITH_OPENMP
+    int num_threads = omp_get_num_threads();
+    int p = omp_get_thread_num();
+    int64_t num_nonzeros = rowptr[num_rows];
+    int64_t startnz = p*(num_nonzeros+num_threads-1)/num_threads;
+    int64_t endnz = (p+1)*(num_nonzeros+num_threads-1)/num_threads;
+    if (endnz > num_nonzeros) endnz = num_nonzeros;
+    int64_t startrow = 0;
+    while (startrow < num_rows && startnz > rowptr[startrow+1]) startrow++;
+    int64_t endrow = startrow;
+    while (endrow < num_rows && endnz-1 > rowptr[endrow+1]) endrow++;
+
+    if (startrow == endrow) {
+        double yi = 0;
+        for (int64_t k = startnz; k < endnz; k++)
+            yi += a[k] * x[colidx[k]];
+        #pragma omp atomic
+        y[startrow] += yi;
+    } else {
+        {
+            double yi = 0;
+            for (int64_t k = startnz; k < rowptr[startrow+1]; k++)
+                yi += a[k] * x[colidx[k]];
+            #pragma omp atomic
+            y[startrow] += yi;
+        }
+
+        for (idx_t i = startrow+1; i < endrow; i++) {
+            double yi = 0;
+            for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
+                yi += a[k] * x[colidx[k]];
+            y[i] += yi;
+        }
+
+        {
+            double yi = 0;
+            for (int64_t k = rowptr[endrow]; k < endnz; k++)
+                yi += a[k] * x[colidx[k]];
+            #pragma omp atomic
+            y[endrow] += yi;
+        }
+
+        if (ad && diagsize > 0) {
+            #pragma omp for
+            for (idx_t i = 0; i < num_rows; i++)
+                y[i] += ad[i]*x[i];
+        }
+    }
+    return 0;
+#else
+    if (ad) {
+        return csrgemvsd(
+            num_rows, y, num_columns, x, csrsize,
+            rowsizemin, rowsizemax, rowptr, colidx, a, ad);
+    } else {
+        return csrgemv(
+            num_rows, y, num_columns, x, csrsize,
+            rowsizemin, rowsizemax, rowptr, colidx, a);
+    }
+#endif
+}
+
 /**
  * `main()`.
  */
@@ -1107,7 +1213,7 @@ int main(int argc, char *argv[])
     err = csr_from_coo_size(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         csrrowptr, &csrsize, &rowsizemin, &rowsizemax, &diagsize,
-        args.separate_diagonal);
+        args.separate_diagonal, args.partition);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
@@ -1129,12 +1235,17 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef WITH_OPENMP
-    #pragma omp parallel for
-#endif
-    for (idx_t i = 0; i < num_rows; i++) {
-        for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
-            csrcolidx[k] = 0;
+    if (args.partition == partition_rows) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) {
+            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                csrcolidx[k] = 0;
+        }
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel for
+        for (int64_t k = 0; k < csrsize; k++) csrcolidx[k] = 0;
     }
+#endif
 #ifdef HAVE_ALIGNED_ALLOC
     size_t csrasize = csrsize*sizeof(double);
     double * csra = aligned_alloc(pagesize, csrasize + pagesize - csrasize % pagesize);
@@ -1163,23 +1274,26 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    if (diagsize > 0) {
 #ifdef WITH_OPENMP
-#pragma omp parallel for
-#endif
+    if (diagsize > 0) {
+        #pragma omp parallel for
         for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
     }
-#ifdef WITH_OPENMP
-    #pragma omp parallel for
-#endif
-    for (idx_t i = 0; i < num_rows; i++) {
-        for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
-            csra[k] = 0;
+    if (args.partition == partition_rows) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) {
+            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                csra[k] = 0;
+        }
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel for
+        for (int64_t k = 0; k < csrsize; k++) csra[k] = 0;
     }
+#endif
     err = csr_from_coo(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         csrrowptr, csrsize, rowsizemin, rowsizemax, csrcolidx, csra, csrad,
-        args.separate_diagonal);
+        args.separate_diagonal, args.partition);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
@@ -1197,22 +1311,46 @@ int main(int argc, char *argv[])
                 timespec_duration(t0, t1), num_rows, num_columns, csrsize+diagsize, rowsizemin, rowsizemax);
 #ifdef WITH_OPENMP
         int nthreads;
-        idx_t num_rows_per_thread;
+        idx_t min_rows_per_thread = IDX_T_MAX;
+        idx_t max_rows_per_thread = 0;
         int64_t min_nonzeros_per_thread = INT64_MAX;
         int64_t max_nonzeros_per_thread = 0;
-#pragma omp parallel reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
-        {
-            nthreads = omp_get_num_threads();
-            num_rows_per_thread = (num_rows+nthreads-1)/nthreads;
-            int64_t num_nonzeros = 0;
-#pragma omp for
-            for (int i = 0; i < num_rows; i++)
-                num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
-            min_nonzeros_per_thread = num_nonzeros;
-            max_nonzeros_per_thread = num_nonzeros;
+        if (args.partition == partition_rows) {
+            #pragma omp parallel \
+                reduction(min:min_rows_per_thread) reduction(max:max_rows_per_thread) \
+                reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
+            {
+                nthreads = omp_get_num_threads();
+                int p = omp_get_thread_num();
+                min_rows_per_thread = max_rows_per_thread = num_rows/nthreads + (p < (num_rows % nthreads));
+                int64_t num_nonzeros = 0;
+                #pragma omp for
+                for (int i = 0; i < num_rows; i++)
+                    num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
+                min_nonzeros_per_thread = num_nonzeros;
+                max_nonzeros_per_thread = num_nonzeros;
+            }
+        } else if (args.partition == partition_nonzeros) {
+            #pragma omp parallel \
+                reduction(min:min_rows_per_thread) reduction(max:max_rows_per_thread) \
+                reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
+            {
+                nthreads = omp_get_num_threads();
+                int p = omp_get_thread_num();
+                int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+                int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+                if (endnz > csrsize) endnz = csrsize;
+                int64_t startrow = 0;
+                while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
+                int64_t endrow = startrow;
+                while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+                min_rows_per_thread = max_rows_per_thread = endrow - startrow;
+                min_nonzeros_per_thread = max_nonzeros_per_thread = csrsize/nthreads + (p < (csrsize % nthreads));
+            }
         }
-        fprintf(stderr, ", %'d threads, %'"PRIdx" rows per thread, %'"PRId64" to %'"PRId64" nonzeros per thread",
-                nthreads, num_rows_per_thread, min_nonzeros_per_thread, max_nonzeros_per_thread);
+        fprintf(stderr, ", %'d threads, %'"PRIdx" to %'"PRIdx" rows per thread, %'"PRId64" to %'"PRId64" nonzeros per thread",
+                nthreads, min_rows_per_thread, max_rows_per_thread,
+                min_nonzeros_per_thread, max_nonzeros_per_thread);
 #endif
         fputc('\n', stderr);
     }
@@ -1232,7 +1370,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef WITH_OPENMP
-#pragma omp parallel for
+    #pragma omp parallel for
 #endif
     for (idx_t j = 0; j < num_columns; j++) x[j] = 1.0;
 
@@ -1445,16 +1583,20 @@ int main(int argc, char *argv[])
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        if (args.separate_diagonal) {
-            err = csrgemvsd(
-                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, csrad);
-            if (err)
-                break;
-        } else {
-            err = csrgemv(
-                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra);
-            if (err)
-                break;
+        if (args.partition == partition_rows) {
+            if (args.separate_diagonal) {
+                err = csrgemvsd(
+                    num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, csrad);
+                if (err) break;
+            } else {
+                err = csrgemv(
+                    num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra);
+                if (err) break;
+            }
+        } else if (args.partition == partition_nonzeros) {
+            err = csrgemvnz(
+                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad);
+            if (err) break;
         }
 
         int64_t num_flops = 2*(csrsize+diagsize);
