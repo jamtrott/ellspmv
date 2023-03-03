@@ -1478,9 +1478,27 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 #ifdef WITH_OPENMP
-    #pragma omp parallel for
-#endif
+    if (args.partition == partition_rows) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel
+        {
+            int nthreads = omp_get_num_threads();
+            int p = omp_get_thread_num();
+            int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+            int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+            if (endnz > csrsize) endnz = csrsize;
+            int64_t startrow = 0;
+            while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
+            int64_t endrow = startrow;
+            while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+            for (idx_t i = startrow; i < endrow; i++) y[i] = 0.0;
+        }
+    }
+#else
     for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
+#endif
 
     /* read y vector from a Matrix Market file */
     if (args.ypath) {
