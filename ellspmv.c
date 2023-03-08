@@ -56,7 +56,7 @@
 
 #include <errno.h>
 
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
@@ -200,7 +200,7 @@ static void program_options_print_version(
 {
     fprintf(f, "%s %s\n", program_name, program_version);
     fprintf(f, "row/column offsets: %d-bit\n", sizeof(idx_t)*CHAR_BIT);
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     fprintf(f, "OpenMP: yes (%d)\n", _OPENMP);
 #else
     fprintf(f, "OpenMP: no\n");
@@ -849,7 +849,7 @@ static int ell_from_coo(
             rowptr[i]++;
         }
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -872,7 +872,7 @@ static int ellgemv(
     const idx_t * __restrict colidx,
     const double * __restrict a)
 {
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -900,7 +900,7 @@ static int ellgemvsd(
     #pragma procedure scache_isolate_assign a, colidx
 #endif
 
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -929,7 +929,7 @@ static int ellgemv16sd(
 #endif
 
     if (rowsize != 16) return EINVAL;
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -1145,7 +1145,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -1180,7 +1180,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -1222,7 +1222,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
 #pragma omp parallel for
 #endif
     for (idx_t j = 0; j < num_columns; j++) x[j] = 1.0;
@@ -1330,7 +1330,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
@@ -1425,7 +1425,7 @@ int main(int argc, char *argv[])
     }
 
     /* 5. compute the matrix-vector multiplication. */
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel
 #endif
     for (int repeat = 0; repeat < args.repeat; repeat++) {

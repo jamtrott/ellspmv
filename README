@@ -44,8 +44,8 @@ where AVX-512 is used for vectorisation. First, we compile the code
 with GCC 11.2.0. Using the option `-fopt-info-vec', we get some extra
 information that shows where vectorization is applied:
 
-	    $ make CC=gcc-11 CFLAGS="-march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp -DWITH_OPENMP"
-	    gcc-11 -c -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp -DWITH_OPENMP ellspmv.c -o ellspmv.o
+	    $ make CC=gcc-11 CFLAGS="-march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp"
+	    gcc-11 -c -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp ellspmv.c -o ellspmv.o
 	    ellspmv.c:773:44: optimized: loop vectorized using 64 byte vectors
 	    ellspmv.c:773:44: optimized: loop vectorized using 32 byte vectors
 	    ellspmv.c:548:14: optimized: loop vectorized using 64 byte vectors
@@ -58,7 +58,7 @@ information that shows where vectorization is applied:
 	    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
 	    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
 	    ellspmv.c:791:13: optimized: basic block part vectorized using 64 byte vectors
-	    gcc-11 -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp -DWITH_OPENMP ellspmv.o  -o ellspmv
+	    gcc-11 -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp ellspmv.o  -o ellspmv
 
 Next, we test the matrix-vector multiplication on a large matrix with
 16 nonzeros per row. With standard OpenMP environment variables, we

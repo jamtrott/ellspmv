@@ -1,3 +1,8 @@
+2023-03-08  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c, ellspmv.c: use _OPENMP instead of WITH_OPENMP to
+	check for OpenMP support.
+
 2023-03-02  James D. Trotter  <james@simula.no>
 
 	add compile-time options for selecting 32- or 64-bit integers for

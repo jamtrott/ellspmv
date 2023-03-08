@@ -51,7 +51,7 @@
 
 #include <errno.h>
 
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
 #include <omp.h>
 #endif
 
@@ -191,7 +191,7 @@ static void program_options_print_help(
     fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
 #endif
     fprintf(f, "  --separate-diagonal    store diagonal nonzeros separately\n");
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     fprintf(f, "  --partition-rows       partition rows evenly among threads (default)\n");
     fprintf(f, "  --partition-nonzeros   partition nonzeros evenly among threads\n");
 #endif
@@ -213,7 +213,7 @@ static void program_options_print_version(
 {
     fprintf(f, "%s %s\n", program_name, program_version);
     fprintf(f, "row/column offsets: %d-bit\n", sizeof(idx_t)*CHAR_BIT);
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     fprintf(f, "OpenMP: yes (%d)\n", _OPENMP);
 #else
     fprintf(f, "OpenMP: no\n");
@@ -831,7 +831,7 @@ static int csr_from_coo_size(
     bool separate_diagonal,
     enum partition partition)
 {
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (idx_t i = 0; i < num_rows; i++) rowptr[i] = 0;
@@ -891,7 +891,7 @@ static int csr_from_coo(
     } else {
         int64_t * __restrict perm = malloc(num_nonzeros * sizeof(int64_t));
         if (!perm) { return errno; }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
         #pragma omp parallel for
 #endif
         for (int64_t k = 0; k < num_nonzeros; k++) perm[k] = 0;
@@ -901,7 +901,7 @@ static int csr_from_coo(
         }
         for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
         rowptr[0] = 0;
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
         #pragma omp parallel for
 #endif
         for (int64_t k = 0; k < num_nonzeros; k++) {
@@ -925,7 +925,7 @@ static int csrgemv(
     const idx_t * __restrict colidx,
     const double * __restrict a)
 {
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -955,7 +955,7 @@ static int csrgemvsd(
     #pragma procedure scache_isolate_assign a, colidx
 #endif
 
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp for simd
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
@@ -981,7 +981,7 @@ static int csrgemvnz(
     idx_t diagsize,
     const double * __restrict ad)
 {
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     int num_threads = omp_get_num_threads();
     int p = omp_get_thread_num();
     int64_t num_nonzeros = rowptr[num_rows];
@@ -1234,7 +1234,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     if (args.partition == partition_rows) {
         #pragma omp parallel for
         for (idx_t i = 0; i < num_rows; i++) {
@@ -1274,7 +1274,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     if (diagsize > 0) {
         #pragma omp parallel for
         for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
@@ -1309,7 +1309,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRIdx" columns, %'"PRId64" nonzeros"
                 ", %'"PRIdx" to %'"PRIdx" nonzeros per row",
                 timespec_duration(t0, t1), num_rows, num_columns, csrsize+diagsize, rowsizemin, rowsizemax);
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
         int nthreads;
         idx_t min_rows_per_thread = IDX_T_MAX;
         idx_t max_rows_per_thread = 0;
@@ -1369,7 +1369,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (idx_t j = 0; j < num_columns; j++) x[j] = 1.0;
@@ -1477,7 +1477,7 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     if (args.partition == partition_rows) {
         #pragma omp parallel for
         for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
@@ -1590,7 +1590,7 @@ int main(int argc, char *argv[])
     }
 
     /* 5. compute the matrix-vector multiplication. */
-#ifdef WITH_OPENMP
+#ifdef _OPENMP
     #pragma omp parallel
 #endif
     for (int repeat = 0; repeat < args.repeat; repeat++) {

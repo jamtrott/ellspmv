@@ -18,7 +18,7 @@
 #
 # Authors: James D. Trotter <james@simula.no>
 #
-# Last modified: 2023-02-28
+# Last modified: 2023-03-08
 #
 # Benchmarking program for sparse matrix-vector multiplication (SpMV)
 # with matrices in ELLPACK and CSR format.
@@ -32,11 +32,7 @@ clean:
 	rm -f $(ellspmv_c_objects) $(ellspmv)
 .PHONY: all clean
 
-ifndef NO_OPENMP
-CFLAGS ?= -fopenmp -DWITH_OPENMP
-else
-CFLAGS ?= -g -Wall
-endif
+CFLAGS ?= -O2 -g -Wall
 LDFLAGS ?= -lm
 
 csrspmv_c_sources = csrspmv.c
