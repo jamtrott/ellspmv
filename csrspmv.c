@@ -27,6 +27,12 @@
  *
  * History:
  *
+ *  1.2 - 2023-03-14:
+ *
+ *   - add a missing barrier for the CSR SpMV with balanced nonzeros
+ *     to ensure that the execution time and performance is accurately
+ *     displayed.
+ *
  *  1.1 - 2023-03-02:
  *
  *   - add option for reading gzip-compressed Matrix Market files
@@ -93,7 +99,7 @@ typedef int64_t idx_t;
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.1";
+const char * program_version = "1.2";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -1022,12 +1028,14 @@ static int csrgemvnz(
             #pragma omp atomic
             y[endrow] += yi;
         }
+    }
 
-        if (ad && diagsize > 0) {
-            #pragma omp for
-            for (idx_t i = 0; i < num_rows; i++)
-                y[i] += ad[i]*x[i];
-        }
+    if (ad && diagsize > 0) {
+        #pragma omp for
+        for (idx_t i = 0; i < num_rows; i++)
+            y[i] += ad[i]*x[i];
+    } else {
+        #pragma omp barrier
     }
     return 0;
 #else
@@ -1594,7 +1602,10 @@ int main(int argc, char *argv[])
     #pragma omp parallel
 #endif
     for (int repeat = 0; repeat < args.repeat; repeat++) {
+#ifdef _OPENMP
+        #pragma omp barrier
         #pragma omp master
+#endif
         if (args.verbose > 0) {
             if (args.separate_diagonal) fprintf(stderr, "gemvsd: ");
             else fprintf(stderr, "gemv: ");
@@ -1624,7 +1635,10 @@ int main(int argc, char *argv[])
             + num_rows*sizeof(*csrrowptr) + csrsize*sizeof(*csrcolidx) + csrsize*sizeof(*csra)
             + diagsize*sizeof(*csrad) + diagsize*sizeof(*x);
 
+#ifdef _OPENMP
+        #pragma omp barrier
         #pragma omp master
+#endif
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",
