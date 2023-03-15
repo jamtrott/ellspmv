@@ -1,0 +1,23 @@
+EFFECTIVE_INST_SPEC
+CPU_CYCLES
+L1D_CACHE_REFILL
+L2D_CACHE_REFILL
+L2D_SWAP_DM
+L2D_CACHE_MIBMCH_PRF
+
+# L1/L2_MISS_WAIT:
+# Amalgamated value of the number of in-flights per cycle in L1/L2 cache miss
+# processing (i.e., value obtained by integrating the number of used MIBs of
+# the L2 cache for each cycle)
+L1_MISS_WAIT
+L2_MISS_WAIT
+
+Formulas:
+
+# Average latency of L1D/L2 cache miss processing:
+Avg latency of L1D miss processing [cycles/miss] = L1_MISS_WAIT / L1D_CACHE_REFILL
+Avg latency of L2 miss processing [cycles/miss] = L2_MISS_WAIT / (L2D_CACHE_REFILL - (L2D_SWAP_DM + L2D_CACHE_MIBMCH_PRF))
+
+# Average number of outstanding misses in L1D/L2 cache miss processing:
+Avg # outstanding L1D cache misses [ ] = L1_MISS_WAIT / CPU_CYCLES
+Avg # outstanding L2 cache misses [ ] = L2_MISS_WAIT / CPU_CYCLES

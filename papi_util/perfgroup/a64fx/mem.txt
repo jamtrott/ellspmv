@@ -1,0 +1,27 @@
+EFFECTIVE_INST_SPEC
+CPU_CYCLES
+L2D_CACHE_REFILL
+L2D_CACHE_WB
+L2D_SWAP_DM
+L2D_CACHE_MIBMCH_PRF
+L1D_CACHE_REFILL
+#L2D_CACHE_REFILL_HWPRF
+L1D_CACHE_WB
+
+Formulas:
+
+CPI [ ] = CPU_CYCLES / EFFECTIVE_INST_SPEC
+Frequency [MHz] = 1.0E-06 * (CPU_CYCLES / time)
+
+# L2 cache misses (corrected) = (L2D_CACHE_REFILL - (L2D_SWAP_DM + L2D_CACHE_MIBMCH_PRF))
+
+L1D cache miss rate [ ] = L1D_CACHE_REFILL/EFFECTIVE_INST_SPEC
+L2D cache miss rate [ ] = (L2D_CACHE_REFILL - (L2D_SWAP_DM + L2D_CACHE_MIBMCH_PRF))/EFFECTIVE_INST_SPEC
+
+L1D-L2 Bandwidth [GB/s] = 1.0e-9 * ((((L1D_CACHE_REFILL + L1D_CACHE_WB)) * 256) / time)
+L1D-L2 Bandwidth (read) [GB/s] = 1.0e-9 * ((L1D_CACHE_REFILL * 256) / time)
+L1D-L2 Bandwidth (write) [GB/s] = 1.0e-9 * ((L1D_CACHE_WB * 256) / time)
+
+L2-Memory Bandwidth [GB/s] = 1.0e-9 * ((((L2D_CACHE_REFILL + L2D_CACHE_WB) - (L2D_SWAP_DM + L2D_CACHE_MIBMCH_PRF)) * 256) / time)
+L2-Memory Bandwidth (read) [GB/s] = 1.0e-9 * ((((L2D_CACHE_REFILL) - (L2D_SWAP_DM + L2D_CACHE_MIBMCH_PRF)) * 256) / time)
+L2-Memory Bandwidth (write) [GB/s] = 1.0e-9 * ((L2D_CACHE_WB * 256) / time)
