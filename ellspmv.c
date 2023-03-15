@@ -26,6 +26,14 @@
  *
  *
  * History:
+ * 
+ *  1.4 - 2023-03-15:
+ * 
+ *   - start / stop counting performance events with papi library and
+ *     "papi_util" wrapper library
+ * 
+ *   - add option to read papi events from event file using the
+ *     environment variable "PAPI_UTIL_EVENTFILE"
  *
  *  1.3 - 2023-03-01:
  *
