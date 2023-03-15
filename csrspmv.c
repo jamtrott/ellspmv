@@ -1,5 +1,5 @@
 /*
- * Benchmark program for ELLPACK SpMV
+ * Benchmark program for CSR SpMV
  *
  * Copyright (C) 2023 James D. Trotter
  *
@@ -18,7 +18,7 @@
  * <https://www.gnu.org/licenses/>.
  *
  * Benchmarking program for sparse matrix-vector multiplication (SpMV)
- * with matrices in ELLPACK format.
+ * with matrices in CSR format.
  *
  * Authors:
  *  James D. Trotter <james@simula.no>
@@ -27,7 +27,7 @@
  *
  * History:
  *
- *  1.3 - 2023-03-01:
+ *  1.1 - 2023-03-02:
  *
  *   - add option for reading gzip-compressed Matrix Market files
  *
@@ -41,17 +41,12 @@
  *   - align allocations to page boundaries if HAVE_ALIGNED_ALLOC is
  *     defined.
  *
- *  1.2 — 2023-02-10:
+ *   - add a CSR SpMV kernel where nonzeros are partitioned evenly
+ *     among threads
  *
- *   - add option for separating diagonal and off-diagonal entries
+ *  1.0 — 2023-02-22:
  *
- *  1.1 — 2022-10-23:
- *
- *   - add cache partitioning for A64FX
- *
- *  1.0 — 2022-05-16:
- *
- *   - initial version
+ *   - initial version based on ellspmv.
  */
 
 #include <errno.h>
@@ -59,11 +54,6 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-
-#if PAPI_UTIL_USEPAPI
-#include "papi_util/include/papi_util.h"
-#endif
-
 
 #ifdef HAVE_LIBZ
 #include <zlib.h>
@@ -85,19 +75,25 @@
 #ifndef IDXTYPEWIDTH
 typedef int idx_t;
 #define PRIdx "d"
+#define IDX_T_MIN INT_MIN
+#define IDX_T_MAX INT_MAX
 #define parse_idx_t parse_int
 #elif IDXTYPEWIDTH == 32
 typedef int32_t idx_t;
 #define PRIdx PRId32
+#define IDX_T_MIN INT32_MIN
+#define IDX_T_MAX INT32_MAX
 #define parse_idx_t parse_int32_t
 #elif IDXTYPEWIDTH == 64
 typedef int64_t idx_t;
 #define PRIdx PRId64
+#define IDX_T_MIN INT64_MIN
+#define IDX_T_MAX INT64_MAX
 #define parse_idx_t parse_int64_t
 #endif
 
-const char * program_name = "ellspmv";
-const char * program_version = "1.3";
+const char * program_name = "csrspmv";
+const char * program_version = "1.1";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -106,6 +102,12 @@ const char * program_license =
     "There is NO WARRANTY, to the extent permitted by law.";
 const char * program_invocation_name;
 const char * program_invocation_short_name;
+
+enum partition
+{
+    partition_rows,
+    partition_nonzeros,
+};
 
 /**
  * ‘program_options’ contains data to related program options.
@@ -119,11 +121,11 @@ struct program_options
     int gzip;
 #endif
     bool separate_diagonal;
+    enum partition partition;
     int repeat;
     int verbose;
     int quiet;
 };
-
 
 /**
  * ‘program_options_init()’ configures the default program options.
@@ -138,6 +140,7 @@ static int program_options_init(
     args->gzip = 0;
 #endif
     args->separate_diagonal = false;
+    args->partition = partition_rows;
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
@@ -162,7 +165,7 @@ static void program_options_free(
 static void program_options_print_usage(
     FILE * f)
 {
-    fprintf(f, "Usage: %s [OPTION..] A [x] [y] [e]\n", program_name);
+    fprintf(f, "Usage: %s [OPTION..] A [x] [y]\n", program_name);
 }
 
 /**
@@ -179,21 +182,25 @@ static void program_options_print_help(
     fprintf(f, " ‘A’ is a matrix, and ‘x’ and ‘y’ are vectors.\n");
     fprintf(f, "\n");
     fprintf(f, " Positional arguments are:\n");
-    fprintf(f, "  A\tpath to Matrix Market file for the matrix A\n");
-    fprintf(f, "  x\toptional path to Matrix Market file for the vector x\n");
-    fprintf(f, "  y\toptional path for to Matrix Market file for the vector y\n");
+    fprintf(f, "  A        path to Matrix Market file for the matrix A\n");
+    fprintf(f, "  x        optional path to Matrix Market file for the vector x\n");
+    fprintf(f, "  y        optional path for to Matrix Market file for the vector y\n");
     fprintf(f, "\n");
     fprintf(f, " Other options are:\n");
 #ifdef HAVE_LIBZ
     fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
 #endif
-    fprintf(f, "  --separate-diagonal\t\tstore diagonal nonzeros separately\n");
-    fprintf(f, "  --repeat=N\t\trepeat matrix-vector multiplication N times\n");
-    fprintf(f, "  -q, --quiet\t\tdo not print Matrix Market output\n");
-    fprintf(f, "  -v, --verbose\t\tbe more verbose\n");
+    fprintf(f, "  --separate-diagonal    store diagonal nonzeros separately\n");
+#ifdef _OPENMP
+    fprintf(f, "  --partition-rows       partition rows evenly among threads (default)\n");
+    fprintf(f, "  --partition-nonzeros   partition nonzeros evenly among threads\n");
+#endif
+    fprintf(f, "  --repeat=N             repeat matrix-vector multiplication N times\n");
+    fprintf(f, "  -q, --quiet            do not print Matrix Market output\n");
+    fprintf(f, "  -v, --verbose          be more verbose\n");
     fprintf(f, "\n");
-    fprintf(f, "  -h, --help\t\tdisplay this help and exit\n");
-    fprintf(f, "  --version\t\tdisplay version information and exit\n");
+    fprintf(f, "  -h, --help             display this help and exit\n");
+    fprintf(f, "  --version              display version information and exit\n");
     fprintf(f, "\n");
     fprintf(f, "Report bugs to: <james@simula.no>\n");
 }
@@ -400,6 +407,15 @@ static int parse_program_options(
     while (*nargs < argc) {
         if (strcmp(argv[0], "--separate-diagonal") == 0) {
             args->separate_diagonal = true;
+            (*nargs)++; argv++; continue;
+        }
+
+        if (strcmp(argv[0], "--partition-rows") == 0) {
+            args->partition = partition_rows;
+            (*nargs)++; argv++; continue;
+        }
+        if (strcmp(argv[0], "--partition-nonzeros") == 0) {
+            args->partition = partition_nonzeros;
             (*nargs)++; argv++; continue;
         }
 
@@ -800,81 +816,112 @@ static int mtxfile_fread_vector_array(
     return 0;
 }
 
-static int ell_from_coo_size(
+static int csr_from_coo_size(
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
-    const idx_t * rowidx,
-    const idx_t * colidx,
-    const double * a,
-    int64_t * rowptr,
-    int64_t * ellsize,
-    idx_t * rowsize,
-    idx_t * diagsize,
-    bool separate_diagonal)
+    const idx_t * __restrict rowidx,
+    const idx_t * __restrict colidx,
+    const double * __restrict a,
+    int64_t * __restrict rowptr,
+    int64_t * __restrict csrsize,
+    idx_t * __restrict rowsizemin,
+    idx_t * __restrict rowsizemax,
+    idx_t * __restrict diagsize,
+    bool separate_diagonal,
+    enum partition partition)
 {
-    idx_t rowmax = 0;
-    for (idx_t i = 0; i <= num_rows; i++) rowptr[i] = 0;
-    for (int64_t k = 0; k < num_nonzeros; k++) {
-        if (!separate_diagonal || rowidx[k] != colidx[k])
-            rowptr[rowidx[k]]++;
+#ifdef _OPENMP
+    #pragma omp parallel for
+#endif
+    for (idx_t i = 0; i < num_rows; i++) rowptr[i] = 0;
+    rowptr[num_rows] = 0;
+    if (num_rows == num_columns && separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            if (rowidx[k] != colidx[k]) rowptr[rowidx[k]]++;
+        }
+    } else {
+        for (int64_t k = 0; k < num_nonzeros; k++) rowptr[rowidx[k]]++;
     }
+    idx_t rowmin = num_rows > 0 ? rowptr[1] : 0;
+    idx_t rowmax = 0;
     for (idx_t i = 1; i <= num_rows; i++) {
+        rowmin = rowmin <= rowptr[i] ? rowmin : rowptr[i];
         rowmax = rowmax >= rowptr[i] ? rowmax : rowptr[i];
         rowptr[i] += rowptr[i-1];
     }
-    *rowsize = rowmax;
-    *ellsize = num_rows * (*rowsize);
-    *diagsize = num_rows < num_columns ? num_rows : num_columns;
+    if (num_rows == num_columns && separate_diagonal) { rowmin++; rowmax++; }
+    *rowsizemin = rowmin;
+    *rowsizemax = rowmax;
+    *csrsize = rowptr[num_rows];
+    *diagsize = (num_rows == num_columns && separate_diagonal) ? num_rows : 0;
     return 0;
 }
 
-static int ell_from_coo(
+static int csr_from_coo(
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
-    const idx_t * rowidx,
-    const idx_t * colidx,
-    const double * a,
-    int64_t * rowptr,
-    int64_t ellsize,
-    idx_t rowsize,
-    idx_t * ellcolidx,
-    double * ella,
-    double * ellad,
-    bool separate_diagonal)
+    const idx_t * __restrict rowidx,
+    const idx_t * __restrict colidx,
+    const double * __restrict a,
+    int64_t * __restrict rowptr,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    idx_t * __restrict csrcolidx,
+    double * __restrict csra,
+    double * __restrict csrad,
+    bool separate_diagonal,
+    enum partition partition)
 {
-    for (idx_t i = 0; i <= num_rows; i++) rowptr[i] = 0;
-    for (int64_t k = 0; k < num_nonzeros; k++) {
-        if (separate_diagonal && rowidx[k] == colidx[k]) {
-            ellad[rowidx[k]-1] += a[k];
-        } else {
-            idx_t i = rowidx[k]-1;
-            ellcolidx[i*rowsize+rowptr[i]] = colidx[k]-1;
-            ella[i*rowsize+rowptr[i]] = a[k];
-            rowptr[i]++;
+    if (num_rows == num_columns && separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            if (rowidx[k] == colidx[k]) {
+                csrad[rowidx[k]-1] += a[k];
+            } else {
+                idx_t i = rowidx[k]-1;
+                csrcolidx[rowptr[i]] = colidx[k]-1;
+                csra[rowptr[i]] = a[k];
+                rowptr[i]++;
+            }
         }
-    }
+        for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+        rowptr[0] = 0;
+    } else {
+        int64_t * __restrict perm = malloc(num_nonzeros * sizeof(int64_t));
+        if (!perm) { return errno; }
 #ifdef _OPENMP
-    #pragma omp for
+        #pragma omp parallel for
 #endif
-    for (idx_t i = 0; i < num_rows; i++) {
-        idx_t j =  i < num_columns ? i : num_columns-1;
-        for (int64_t l = rowptr[i]; l < rowsize; l++) {
-            ellcolidx[i*rowsize+l] = j;
-            ella[i*rowsize+l] = 0.0;
+        for (int64_t k = 0; k < num_nonzeros; k++) perm[k] = 0;
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            idx_t i = rowidx[k]-1;
+            perm[rowptr[i]++] = k;
         }
+        for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+        rowptr[0] = 0;
+#ifdef _OPENMP
+        #pragma omp parallel for
+#endif
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            csrcolidx[k] = colidx[perm[k]]-1;
+            csra[k] = a[perm[k]];
+        }
+        free(perm);
     }
     return 0;
 }
 
-static int ellgemv(
+static int csrgemv(
     idx_t num_rows,
     double * __restrict y,
     idx_t num_columns,
     const double * __restrict x,
-    int64_t ellsize,
-    idx_t rowsize,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    const int64_t * __restrict rowptr,
     const idx_t * __restrict colidx,
     const double * __restrict a)
 {
@@ -883,20 +930,22 @@ static int ellgemv(
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
-        for (idx_t l = 0; l < rowsize; l++)
-            yi += a[i*rowsize+l] * x[colidx[i*rowsize+l]];
+        for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
+            yi += a[k] * x[colidx[k]];
         y[i] += yi;
     }
     return 0;
 }
 
-static int ellgemvsd(
+static int csrgemvsd(
     idx_t num_rows,
     double * __restrict y,
     idx_t num_columns,
     const double * __restrict x,
-    int64_t ellsize,
-    idx_t rowsize,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    const int64_t * __restrict rowptr,
     const idx_t * __restrict colidx,
     const double * __restrict a,
     const double * __restrict ad)
@@ -911,53 +960,87 @@ static int ellgemvsd(
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
-        for (idx_t l = 0; l < rowsize; l++)
-            yi += a[i*rowsize+l] * x[colidx[i*rowsize+l]];
+        for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
+            yi += a[k] * x[colidx[k]];
         y[i] += ad[i]*x[i] + yi;
     }
     return 0;
 }
 
-static int ellgemv16sd(
+static int csrgemvnz(
     idx_t num_rows,
     double * __restrict y,
     idx_t num_columns,
     const double * __restrict x,
-    int64_t ellsize,
-    idx_t rowsize,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    const int64_t * __restrict rowptr,
     const idx_t * __restrict colidx,
     const double * __restrict a,
+    idx_t diagsize,
     const double * __restrict ad)
 {
-#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_way L2=L2WAYS
-    #pragma procedure scache_isolate_assign a, colidx
-#endif
-
-    if (rowsize != 16) return EINVAL;
 #ifdef _OPENMP
-    #pragma omp for simd
-#endif
-    for (idx_t i = 0; i < num_rows; i++) {
-        y[i] += ad[i]*x[i] +
-            a[i*16+ 0] * x[colidx[i*16+ 0]] +
-            a[i*16+ 1] * x[colidx[i*16+ 1]] +
-            a[i*16+ 2] * x[colidx[i*16+ 2]] +
-            a[i*16+ 3] * x[colidx[i*16+ 3]] +
-            a[i*16+ 4] * x[colidx[i*16+ 4]] +
-            a[i*16+ 5] * x[colidx[i*16+ 5]] +
-            a[i*16+ 6] * x[colidx[i*16+ 6]] +
-            a[i*16+ 7] * x[colidx[i*16+ 7]] +
-            a[i*16+ 8] * x[colidx[i*16+ 8]] +
-            a[i*16+ 9] * x[colidx[i*16+ 9]] +
-            a[i*16+10] * x[colidx[i*16+10]] +
-            a[i*16+11] * x[colidx[i*16+11]] +
-            a[i*16+12] * x[colidx[i*16+12]] +
-            a[i*16+13] * x[colidx[i*16+13]] +
-            a[i*16+14] * x[colidx[i*16+14]] +
-            a[i*16+15] * x[colidx[i*16+15]];
+    int num_threads = omp_get_num_threads();
+    int p = omp_get_thread_num();
+    int64_t num_nonzeros = rowptr[num_rows];
+    int64_t startnz = p*(num_nonzeros+num_threads-1)/num_threads;
+    int64_t endnz = (p+1)*(num_nonzeros+num_threads-1)/num_threads;
+    if (endnz > num_nonzeros) endnz = num_nonzeros;
+    int64_t startrow = 0;
+    while (startrow < num_rows && startnz > rowptr[startrow+1]) startrow++;
+    int64_t endrow = startrow;
+    while (endrow < num_rows && endnz-1 > rowptr[endrow+1]) endrow++;
+
+    if (startrow == endrow) {
+        double yi = 0;
+        for (int64_t k = startnz; k < endnz; k++)
+            yi += a[k] * x[colidx[k]];
+        #pragma omp atomic
+        y[startrow] += yi;
+    } else {
+        {
+            double yi = 0;
+            for (int64_t k = startnz; k < rowptr[startrow+1]; k++)
+                yi += a[k] * x[colidx[k]];
+            #pragma omp atomic
+            y[startrow] += yi;
+        }
+
+        for (idx_t i = startrow+1; i < endrow; i++) {
+            double yi = 0;
+            for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
+                yi += a[k] * x[colidx[k]];
+            y[i] += yi;
+        }
+
+        {
+            double yi = 0;
+            for (int64_t k = rowptr[endrow]; k < endnz; k++)
+                yi += a[k] * x[colidx[k]];
+            #pragma omp atomic
+            y[endrow] += yi;
+        }
+
+        if (ad && diagsize > 0) {
+            #pragma omp for
+            for (idx_t i = 0; i < num_rows; i++)
+                y[i] += ad[i]*x[i];
+        }
     }
     return 0;
+#else
+    if (ad) {
+        return csrgemvsd(
+            num_rows, y, num_columns, x, csrsize,
+            rowsizemin, rowsizemax, rowptr, colidx, a, ad);
+    } else {
+        return csrgemv(
+            num_rows, y, num_columns, x, csrsize,
+            rowsizemin, rowsizemax, rowptr, colidx, a);
+    }
+#endif
 }
 
 /**
@@ -1105,113 +1188,171 @@ int main(int argc, char *argv[])
     }
     stream_close(streamtype, stream);
 
-    /* 3. Convert to ELLPACK format. */
+    /* 3. Convert to CSR format. */
     if (args.verbose > 0) {
-        fprintf(stderr, "ell_from_coo: ");
+        fprintf(stderr, "csr_from_coo: ");
         clock_gettime(CLOCK_MONOTONIC, &t0);
     }
 
 #ifdef HAVE_ALIGNED_ALLOC
-    size_t rowptrsize = (num_rows+1)*sizeof(int64_t);
-    int64_t * rowptr = aligned_alloc(pagesize, rowptrsize + pagesize - rowptrsize % pagesize);
+    size_t csrrowptrsize = (num_rows+1)*sizeof(int64_t);
+    int64_t * csrrowptr = aligned_alloc(pagesize, csrrowptrsize + pagesize - csrrowptrsize % pagesize);
 #else
-    int64_t * rowptr = malloc((num_rows+1) * sizeof(int64_t));
+    int64_t * csrrowptr = malloc((num_rows+1) * sizeof(int64_t));
 #endif
-    if (!rowptr) {
+    if (!csrrowptr) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
         free(a); free(colidx); free(rowidx);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    int64_t ellsize;
-    idx_t rowsize;
+    int64_t csrsize;
+    idx_t rowsizemin, rowsizemax;
     idx_t diagsize;
-    err = ell_from_coo_size(
+    err = csr_from_coo_size(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
-        rowptr, &ellsize, &rowsize, &diagsize,
-        args.separate_diagonal);
+        csrrowptr, &csrsize, &rowsizemin, &rowsizemax, &diagsize,
+        args.separate_diagonal, args.partition);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
-        free(rowptr); free(a); free(colidx); free(rowidx);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    size_t ellcolidxsize = ellsize*sizeof(idx_t);
-    idx_t * ellcolidx = aligned_alloc(pagesize, ellcolidxsize + pagesize - ellcolidxsize % pagesize);
+    size_t csrcolidxsize = csrsize*sizeof(idx_t);
+    idx_t * csrcolidx = aligned_alloc(pagesize, csrcolidxsize + pagesize - csrcolidxsize % pagesize);
 #else
-    idx_t * ellcolidx = malloc(ellsize * sizeof(idx_t));
+    idx_t * csrcolidx = malloc(csrsize * sizeof(idx_t));
 #endif
-    if (!ellcolidx) {
+    if (!csrcolidx) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(rowptr); free(a); free(colidx); free(rowidx);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
 #ifdef _OPENMP
-    #pragma omp parallel for
-#endif
-    for (idx_t i = 0; i < num_rows; i++) {
-        for (idx_t l = 0; l < rowsize; l++)
-            ellcolidx[i*rowsize+l] = 0;
+    if (args.partition == partition_rows) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) {
+            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                csrcolidx[k] = 0;
+        }
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel for
+        for (int64_t k = 0; k < csrsize; k++) csrcolidx[k] = 0;
     }
-#ifdef HAVE_ALIGNED_ALLOC
-    size_t ellasize = ellsize*sizeof(double);
-    double * ella = aligned_alloc(pagesize, ellasize + pagesize - ellasize % pagesize);
-#else
-    double * ella = malloc(ellsize * sizeof(double));
 #endif
-    if (!ella) {
+#ifdef HAVE_ALIGNED_ALLOC
+    size_t csrasize = csrsize*sizeof(double);
+    double * csra = aligned_alloc(pagesize, csrasize + pagesize - csrasize % pagesize);
+#else
+    double * csra = malloc(csrsize * sizeof(double));
+#endif
+    if (!csra) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(ellcolidx);
-        free(rowptr); free(a); free(colidx); free(rowidx);
+        free(csrcolidx);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
 #ifdef HAVE_ALIGNED_ALLOC
-    size_t elladsize = diagsize*sizeof(double);
-    double * ellad = aligned_alloc(pagesize, elladsize + pagesize - elladsize % pagesize);
+    size_t csradsize = diagsize*sizeof(double);
+    double * csrad = aligned_alloc(pagesize, csradsize + pagesize - csradsize % pagesize);
 #else
-    double * ellad = malloc(diagsize * sizeof(double));
+    double * csrad = malloc(diagsize * sizeof(double));
 #endif
-    if (!ellad) {
+    if (!csrad) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(ella); free(ellcolidx);
-        free(rowptr); free(a); free(colidx); free(rowidx);
+        free(csra); free(csrcolidx);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
 #ifdef _OPENMP
-    #pragma omp parallel for
-#endif
-    for (idx_t i = 0; i < num_rows; i++) {
-        ellad[i] = 0;
-        for (idx_t l = 0; l < rowsize; l++)
-            ella[i*rowsize+l] = 0;
+    if (diagsize > 0) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
     }
-    err = ell_from_coo(
+    if (args.partition == partition_rows) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) {
+            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                csra[k] = 0;
+        }
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel for
+        for (int64_t k = 0; k < csrsize; k++) csra[k] = 0;
+    }
+#endif
+    err = csr_from_coo(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
-        rowptr, ellsize, rowsize, ellcolidx, ella, ellad,
-        args.separate_diagonal);
+        csrrowptr, csrsize, rowsizemin, rowsizemax, csrcolidx, csra, csrad,
+        args.separate_diagonal, args.partition);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
-        free(ellad); free(ella); free(ellcolidx);
-        free(rowptr); free(a); free(colidx); free(rowidx);
+        free(csrad); free(csra); free(csrcolidx);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    free(rowptr); free(a); free(colidx); free(rowidx);
+    free(a); free(colidx); free(rowidx);
 
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
-        fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRId64" nonzeros, %'"PRIdx" nonzeros per row\n",
-                timespec_duration(t0, t1), num_rows, ellsize + num_rows, rowsize);
+        fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRIdx" columns, %'"PRId64" nonzeros"
+                ", %'"PRIdx" to %'"PRIdx" nonzeros per row",
+                timespec_duration(t0, t1), num_rows, num_columns, csrsize+diagsize, rowsizemin, rowsizemax);
+#ifdef _OPENMP
+        int nthreads;
+        idx_t min_rows_per_thread = IDX_T_MAX;
+        idx_t max_rows_per_thread = 0;
+        int64_t min_nonzeros_per_thread = INT64_MAX;
+        int64_t max_nonzeros_per_thread = 0;
+        if (args.partition == partition_rows) {
+            #pragma omp parallel \
+                reduction(min:min_rows_per_thread) reduction(max:max_rows_per_thread) \
+                reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
+            {
+                nthreads = omp_get_num_threads();
+                int p = omp_get_thread_num();
+                min_rows_per_thread = max_rows_per_thread = num_rows/nthreads + (p < (num_rows % nthreads));
+                int64_t num_nonzeros = 0;
+                #pragma omp for
+                for (int i = 0; i < num_rows; i++)
+                    num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
+                min_nonzeros_per_thread = num_nonzeros;
+                max_nonzeros_per_thread = num_nonzeros;
+            }
+        } else if (args.partition == partition_nonzeros) {
+            #pragma omp parallel \
+                reduction(min:min_rows_per_thread) reduction(max:max_rows_per_thread) \
+                reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
+            {
+                nthreads = omp_get_num_threads();
+                int p = omp_get_thread_num();
+                int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+                int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+                if (endnz > csrsize) endnz = csrsize;
+                int64_t startrow = 0;
+                while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
+                int64_t endrow = startrow;
+                while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+                min_rows_per_thread = max_rows_per_thread = endrow - startrow;
+                min_nonzeros_per_thread = max_nonzeros_per_thread = csrsize/nthreads + (p < (csrsize % nthreads));
+            }
+        }
+        fprintf(stderr, ", %'d threads, %'"PRIdx" to %'"PRIdx" rows per thread, %'"PRId64" to %'"PRId64" nonzeros per thread",
+                nthreads, min_rows_per_thread, max_rows_per_thread,
+                min_nonzeros_per_thread, max_nonzeros_per_thread);
+#endif
+        fputc('\n', stderr);
     }
 
     /* 4. allocate vectors */
@@ -1224,12 +1365,12 @@ int main(int argc, char *argv[])
     if (!x) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(ellad); free(ella); free(ellcolidx);
+        free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
 #ifdef _OPENMP
-#pragma omp parallel for
+    #pragma omp parallel for
 #endif
     for (idx_t j = 0; j < num_columns; j++) x[j] = 1.0;
 
@@ -1249,7 +1390,7 @@ int main(int argc, char *argv[])
             if ((stream.f = fopen(args.xpath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.xpath, strerror(errno));
-                free(x); free(ellad); free(ella); free(ellcolidx);
+                free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1259,7 +1400,7 @@ int main(int argc, char *argv[])
             if ((stream.gzf = gzopen(args.xpath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.xpath, strerror(errno));
-                free(x); free(ellad); free(ella); free(ellcolidx);
+                free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1285,7 +1426,7 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.xpath, lines_read+1, strerror(err));
             stream_close(streamtype, stream);
-            free(x); free(ellad); free(ella); free(ellcolidx);
+            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         } else if (object != mtxvector || format != mtxarray || xnum_rows != num_columns) {
@@ -1295,7 +1436,7 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.xpath, lines_read+1, num_columns);
             stream_close(streamtype, stream);
-            free(x); free(ellad); free(ella); free(ellcolidx);
+            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
@@ -1307,7 +1448,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, strerror(err));
-            free(x); free(ellad); free(ella); free(ellcolidx);
+            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             stream_close(streamtype, stream);
             program_options_free(&args);
             return EXIT_FAILURE;
@@ -1332,14 +1473,32 @@ int main(int argc, char *argv[])
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
         free(x);
-        free(ellad); free(ella); free(ellcolidx);
+        free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
 #ifdef _OPENMP
-    #pragma omp parallel for
-#endif
+    if (args.partition == partition_rows) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel
+        {
+            int nthreads = omp_get_num_threads();
+            int p = omp_get_thread_num();
+            int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+            int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+            if (endnz > csrsize) endnz = csrsize;
+            int64_t startrow = 0;
+            while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
+            int64_t endrow = startrow;
+            while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+            for (idx_t i = startrow; i < endrow; i++) y[i] = 0.0;
+        }
+    }
+#else
     for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
+#endif
 
     /* read y vector from a Matrix Market file */
     if (args.ypath) {
@@ -1357,7 +1516,7 @@ int main(int argc, char *argv[])
             if ((stream.f = fopen(args.ypath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.ypath, strerror(errno));
-                free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+                free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1367,7 +1526,7 @@ int main(int argc, char *argv[])
             if ((stream.gzf = gzopen(args.ypath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.ypath, strerror(errno));
-                free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+                free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1393,17 +1552,17 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.ypath, lines_read+1, strerror(err));
             stream_close(streamtype, stream);
-            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         } else if (object != mtxvector || format != mtxarray || ynum_rows != num_rows) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s:%"PRId64": "
-                    "expected vector in array format of size %"PRIdx"\n",
+                    "expected vector in array format of size %'"PRIdx"\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, num_rows);
             stream_close(streamtype, stream);
-            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
@@ -1415,7 +1574,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, strerror(err));
-            free(y); free(x); free(ellad); free(ella); free(ellcolidx);
+            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             stream_close(streamtype, stream);
             program_options_free(&args);
             return EXIT_FAILURE;
@@ -1430,26 +1589,6 @@ int main(int argc, char *argv[])
         stream_close(streamtype, stream);
     }
 
-#if PAPI_UTIL_USEPAPI
-    struct papi_util_opt papi_opt = (struct papi_util_opt) {
-                            .event_file = getenv("PAPI_UTIL_EVENTFILE"),
-                            .print_csv = 0,
-                            .print_threads = 0,
-                            .print_summary = 1,
-                            .print_region = 0,
-                            .component = 0,
-                            .multiplex = 0,
-                            .output = stdout
-                            };
-
-    fprintf(stderr, "[PAPI util] using event file: %s\n", papi_opt.event_file);
-
-    if(papi_opt.event_file != NULL) {
-        PAPI_UTIL_SETUP(&papi_opt);
-        PAPI_UTIL_START("ellspmv"); // start counting for region "ellspmv"
-    }
-#endif
-
     /* 5. compute the matrix-vector multiplication. */
 #ifdef _OPENMP
     #pragma omp parallel
@@ -1457,35 +1596,33 @@ int main(int argc, char *argv[])
     for (int repeat = 0; repeat < args.repeat; repeat++) {
         #pragma omp master
         if (args.verbose > 0) {
-            if (args.separate_diagonal && rowsize == 16) fprintf(stderr, "gemv16sd: ");
-            else if (args.separate_diagonal) fprintf(stderr, "gemvsd: ");
+            if (args.separate_diagonal) fprintf(stderr, "gemvsd: ");
             else fprintf(stderr, "gemv: ");
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        if (args.separate_diagonal && rowsize == 16) {
-            err = ellgemv16sd(
-                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
-            if (err)
-                break;
-        } else if (args.separate_diagonal) {
-            err = ellgemvsd(
-                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
-            if (err)
-                break;
-        } else {
-            err = ellgemv(
-                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella);
-            if (err)
-                break;
+        if (args.partition == partition_rows) {
+            if (args.separate_diagonal) {
+                err = csrgemvsd(
+                    num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, csrad);
+                if (err) break;
+            } else {
+                err = csrgemv(
+                    num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra);
+                if (err) break;
+            }
+        } else if (args.partition == partition_nonzeros) {
+            err = csrgemvnz(
+                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad);
+            if (err) break;
         }
 
-        int64_t num_flops = 2*(ellsize+diagsize);
+        int64_t num_flops = 2*(csrsize+diagsize);
         int64_t min_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
-            + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella) + diagsize*sizeof(*ellad);
-        int64_t max_bytes = num_rows*sizeof(*y) + ellsize*sizeof(*x)
-            + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella)
-            + diagsize*sizeof(*ellad) + diagsize*sizeof(*x);
+            + (num_rows+1)*sizeof(*csrrowptr) + csrsize*sizeof(*csrcolidx) + csrsize*sizeof(*csra) + diagsize*sizeof(*csrad);
+        int64_t max_bytes = num_rows*sizeof(*y) + csrsize*sizeof(*x)
+            + num_rows*sizeof(*csrrowptr) + csrsize*sizeof(*csrcolidx) + csrsize*sizeof(*csra)
+            + diagsize*sizeof(*csrad) + diagsize*sizeof(*x);
 
         #pragma omp master
         if (args.verbose > 0) {
@@ -1498,24 +1635,15 @@ int main(int argc, char *argv[])
                     (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
         }
     }
-
-#if PAPI_UTIL_USEPAPI
-    if(papi_opt.event_file != NULL) {
-        // stop counters for current region "ellspmv"
-        PAPI_UTIL_FINISH();
-        // print results
-        PAPI_UTIL_FINALIZE();
-    }
-#endif
-
     if (err) {
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
         free(y); free(x);
-        free(ellad); free(ella); free(ellcolidx);
+        free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-    free(x); free(ellad); free(ella); free(ellcolidx);
+    free(x);
+    free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
 
     /* 6. write the result vector to a file */
     if (!args.quiet) {

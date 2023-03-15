@@ -1,6 +1,6 @@
-Authors of ellspmv.
+Authors of csrspmv and ellspmv.
 
-  Copyright (C) 2022 James D. Trotter
+  Copyright (C) 2023 James D. Trotter
 
   Copying and distribution of this file, with or without modification,
   are permitted in any medium without royalty provided the copyright
@@ -9,3 +9,6 @@ Authors of ellspmv.
 See also the ChangeLog file.
 
 James D. Trotter wrote the initial version of all files.
+
+Sergej Breiter added A64FX cache partitioning directives and scripts
+for building and running on A64FX.

@@ -23,5 +23,7 @@ export XOS_MMM_L_HPAGE_TYPE=hugetlbfs
 
 MATRIX=Lynx68_reordered/Lynx68_reordered.mtx
 OUTVECTOR=out.mtx
-EVENTFILE=papi_util/perfgroup/a64fx/memdp.txt
-./ellspmv -v ${MATRIX} ${OUTVECTOR} ${EVENTFILE} 
+
+# using example event file (measures memory bandwidth and dp flops)
+export PAPI_UTIL_EVENTFILE=papi_util/perfgroup/a64fx/memdp.txt
+./ellspmv -v ${MATRIX} ${OUTVECTOR}

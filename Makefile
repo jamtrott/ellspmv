@@ -1,5 +1,6 @@
-# Benchmark program for sparse matrix-vector multiply (ELLPACK format)
-# Copyright (C) 2022 James D. Trotter
+# Benchmark programs for sparse matrix-vector multiply
+#
+# Copyright (C) 2023 James D. Trotter
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,26 +17,32 @@
 # <https://www.gnu.org/licenses/>.
 #
 # Authors: James D. Trotter <james@simula.no>
-# Last modified: 2022-05-13
+#
+# Last modified: 2023-03-08
 #
 # Benchmarking program for sparse matrix-vector multiplication (SpMV)
-# with matrices in ELLPACK format.
+# with matrices in ELLPACK and CSR format.
 
+csrspmv = csrspmv
 ellspmv = ellspmv
 
-all: $(ellspmv)
+all: $(csrspmv) $(ellspmv)
 clean:
+	rm -f $(csrspmv_c_objects) $(csrspmv)
 	rm -f $(ellspmv_c_objects) $(ellspmv)
 	cd papi_util; $(MAKE) clean
 .PHONY: all clean
 
-CFLAGS += -g -Wall 
-#CFLAGS += -Ofast -march=native
-#CFLAGS += -Wextra
+CFLAGS ?= -O2 -g -Wall
+LDFLAGS ?= -lm
 
-ifndef NO_OPENMP
-CFLAGS += -fopenmp
-endif
+csrspmv_c_sources = csrspmv.c
+csrspmv_c_headers =
+csrspmv_c_objects := $(foreach x,$(csrspmv_c_sources),$(x:.c=.o))
+$(csrspmv_c_objects): %.o: %.c $(csrspmv_c_headers)
+	$(CC) -c $(CFLAGS) $< -o $@
+$(csrspmv): $(csrspmv_c_objects)
+	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
 
 ellspmv_c_sources := ellspmv.c
 ellspmv_c_headers =
@@ -50,8 +57,8 @@ USEPAPI?=0
 ifeq (1,$(USEPAPI))
 PAPI_OBJ=papi_util/src/papi_util.o
 LDFLAGS += $(PAPI_LIB) -lpapi
-endif
 CFLAGS += -DPAPI_UTIL_USEPAPI=$(USEPAPI)
+endif
 
 $(PAPI_OBJ):
 	cd papi_util; $(MAKE) PAPI_INC=$(PAPI_INC)

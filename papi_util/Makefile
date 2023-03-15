@@ -7,8 +7,7 @@ OBJECTS:=$(SOURCES:.c=.o)
 
 INC:=-Iinclude $(PAPI_INC)
 
-CFLAGS ?= -Wall -Wextra -fopenmp
-CFLAGS += -O2
+CFLAGS ?= -Wall -Wextra -O2 -fopenmp
 
 all: $(OBJECTS)
 

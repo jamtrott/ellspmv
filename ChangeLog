@@ -1,7 +1,60 @@
+2023-03-08  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c, ellspmv.c: use _OPENMP instead of WITH_OPENMP to
+	check for OpenMP support.
+
+2023-03-02  James D. Trotter  <james@simula.no>
+
+	add compile-time options for selecting 32- or 64-bit integers for
+	row/column offsets (i.e., compile with -DIDXTYPEWIDTH=32 or
+	-DIDXTYPEWIDTH=64)
+
+	allow matrices and vectors with integer and pattern fields by
+	converting integers to doubles or by setting the double
+	precision floating-point matrix/vector values equal to one.
+
+	align allocations to page boundaries if HAVE_ALIGNED_ALLOC is
+	defined
+
+	add a CSR SpMV kernel where nonzeros are partitioned evenly among
+	threads
+
+2023-02-28  James D. Trotter  <james@simula.no>
+
+	add option for reading gzip-compressed Matrix Market files.
+
+2023-02-22  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c: add an analogous implementation of matrix-vector
+	multiply for matrices in CSR format.
+
+2023-02-10  James D. Trotter  <james@simula.no>
+
+	* ellspmv.c: add option for separating diagonal and offdiagonal
+	entries, which is a common trick that may improve SpMV
+	performance.
+
+	also, print a range of throughput, where the minimum is based on
+	loading column vector entries only once, whereas the maximum is
+	based on loading column vector entries every time. (This is a
+	measure of effective throughput and does not account for entire
+	cache lines of column vector entries being loaded and some of
+	those values not being used. The true throughput of data traffic
+	in the memory hierarchy may be even higher than the effective
+	throughput due to loading entire cache lines at a time rather than
+	single column vector entries.)
+
+	add options for reading x and y vectors from file, and use
+	standard output for printing results.
+
+2022-08-29 Sergej Breiter <breiter@nm.ifi.lmu.de>
+
+        Add A64FX cache partitioning directives for Fujitsu C compiler.
+
 2022-05-16 James D. Trotter <james@simula.no>
 
         Initial version.
 
-Copyright (C) 2022 James D. Trotter
+Copyright (C) 2023 James D. Trotter
 Copying and distribution of this file, with or without modification, are
 permitted provided the copyright notice and this notice are preserved.
