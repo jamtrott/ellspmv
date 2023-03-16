@@ -105,7 +105,7 @@ typedef int64_t idx_t;
 #endif
 
 const char * program_name = "ellspmv";
-const char * program_version = "1.3";
+const char * program_version = "1.4-a64fx";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
