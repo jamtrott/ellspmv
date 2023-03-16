@@ -57,7 +57,7 @@ USEPAPI?=0
 ifeq (1,$(USEPAPI))
 PAPI_OBJ=papi_util/src/papi_util.o
 LDFLAGS += $(PAPI_LIB) -lpapi
-CFLAGS += -DPAPI_UTIL_USEPAPI=$(USEPAPI)
+CFLAGS += -DHAVE_PAPI
 endif
 
 $(PAPI_OBJ):

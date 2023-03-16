@@ -30,7 +30,7 @@
  *  1.4 - 2023-03-15:
  * 
  *   - start / stop counting performance events with papi library and
- *     "papi_util" wrapper library
+ *     "papi_util" wrapper library if HAVE_PAPI is defined
  * 
  *   - add option to read papi events from event file using the
  *     environment variable "PAPI_UTIL_EVENTFILE"
@@ -68,10 +68,10 @@
 #include <omp.h>
 #endif
 
-#if PAPI_UTIL_USEPAPI
+#ifdef HAVE_PAPI
 #include "papi_util/include/papi_util.h"
+#include <papi.h>
 #endif
-
 
 #ifdef HAVE_LIBZ
 #include <zlib.h>
@@ -223,6 +223,11 @@ static void program_options_print_version(
     fprintf(f, "zlib: yes ("ZLIB_VERSION")\n");
 #else
     fprintf(f, "zlib: no\n");
+#endif
+#ifdef HAVE_PAPI
+    fprintf(f, "PAPI: yes (%d.%d.%d.%d)\n", PAPI_VERSION_MAJOR(PAPI_VERSION), PAPI_VERSION_MINOR(PAPI_VERSION), PAPI_VERSION_REVISION(PAPI_VERSION), PAPI_VERSION_INCREMENT(PAPI_VERSION));
+#else
+    fprintf(f, "PAPI: no\n");
 #endif
 #ifdef HAVE_ALIGNED_ALLOC
     fprintf(f, "page-aligned allocations: yes (page size: %ld)\n", sysconf(_SC_PAGESIZE));
@@ -998,6 +1003,17 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+#ifdef _OPENMP
+    #pragma omp parallel
+    {
+      /*
+       * This empty parallel section is used to make the OpenMP
+       * runtime output its configuration now if the environment
+       * variable OMP_DISPLAY_ENV is set.
+       */
+    }
+#endif
+
     /* 2. Read the matrix from a Matrix Market file. */
     if (args.verbose > 0) {
         fprintf(stderr, "mtxfile_read: ");
@@ -1438,7 +1454,7 @@ int main(int argc, char *argv[])
         stream_close(streamtype, stream);
     }
 
-#if PAPI_UTIL_USEPAPI
+#ifdef HAVE_PAPI
     struct papi_util_opt papi_opt = (struct papi_util_opt) {
                             .event_file = getenv("PAPI_UTIL_EVENTFILE"),
                             .print_csv = 0,
@@ -1507,7 +1523,7 @@ int main(int argc, char *argv[])
         }
     }
 
-#if PAPI_UTIL_USEPAPI
+#if HAVE_PAPI
     if(papi_opt.event_file != NULL) {
         // stop counters for current region "ellspmv"
         PAPI_UTIL_FINISH();

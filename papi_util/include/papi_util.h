@@ -23,7 +23,7 @@ struct papi_util_opt {
     FILE *output;
 };
 
-#if PAPI_UTIL_USEPAPI
+#ifdef HAVE_PAPI
 #define PAPI_UTIL_SETUP(o) PAPI_UTIL_setup(o)
 #define PAPI_UTIL_START(r) PAPI_UTIL_start(r)
 #define PAPI_UTIL_FINISH() PAPI_UTIL_finish()
@@ -33,7 +33,7 @@ struct papi_util_opt {
 #define PAPI_UTIL_START(r)
 #define PAPI_UTIL_FINISH()
 #define PAPI_UTIL_FINALIZE()
-#endif /* PAPI_UTIL_USEPAPI */
+#endif /* HAVE_PAPI */
 
 /**
  *
