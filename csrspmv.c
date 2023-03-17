@@ -29,6 +29,9 @@
  *
  *  1.3 - 2023-03-17:
  *
+ *   - allow symmetric matrices by adding two nonzeros to the CSR
+       representation for every off-diagonal nonzero
+ *
  *   - add an option for precomputing first and final rows for each
  *     thread for the load-balanced SpMV kernel (csrgemvnz)
  *
@@ -104,7 +107,7 @@ typedef int64_t idx_t;
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.2";
+const char * program_version = "1.3";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -835,6 +838,7 @@ static int mtxfile_fread_vector_array(
 }
 
 static int csr_from_coo_size(
+    enum mtxsymmetry symmetry,
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
@@ -854,13 +858,20 @@ static int csr_from_coo_size(
 #endif
     for (idx_t i = 0; i < num_rows; i++) rowptr[i] = 0;
     rowptr[num_rows] = 0;
-    if (num_rows == num_columns && separate_diagonal) {
+    if (num_rows == num_columns && symmetry == mtxsymmetric && separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            if (rowidx[k] != colidx[k]) { rowptr[rowidx[k]]++; rowptr[colidx[k]]++; }
+        }
+    } else if (num_rows == num_columns && symmetry == mtxsymmetric && !separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            if (rowidx[k] != colidx[k]) { rowptr[rowidx[k]]++; rowptr[colidx[k]]++; }
+            else { rowptr[rowidx[k]]++; }
+        }
+    } else if (num_rows == num_columns && separate_diagonal) {
         for (int64_t k = 0; k < num_nonzeros; k++) {
             if (rowidx[k] != colidx[k]) rowptr[rowidx[k]]++;
         }
-    } else {
-        for (int64_t k = 0; k < num_nonzeros; k++) rowptr[rowidx[k]]++;
-    }
+    } else { for (int64_t k = 0; k < num_nonzeros; k++) rowptr[rowidx[k]]++; }
     idx_t rowmin = num_rows > 0 ? rowptr[1] : 0;
     idx_t rowmax = 0;
     for (idx_t i = 1; i <= num_rows; i++) {
@@ -877,6 +888,7 @@ static int csr_from_coo_size(
 }
 
 static int csr_from_coo(
+    enum mtxsymmetry symmetry,
     idx_t num_rows,
     idx_t num_columns,
     int64_t num_nonzeros,
@@ -893,20 +905,42 @@ static int csr_from_coo(
     bool separate_diagonal,
     enum partition partition)
 {
-    if (num_rows == num_columns && separate_diagonal) {
-        for (int64_t k = 0; k < num_nonzeros; k++) {
-            if (rowidx[k] == colidx[k]) {
-                csrad[rowidx[k]-1] += a[k];
-            } else {
-                idx_t i = rowidx[k]-1;
-                csrcolidx[rowptr[i]] = colidx[k]-1;
-                csra[rowptr[i]] = a[k];
-                rowptr[i]++;
+    if (num_rows == num_columns && symmetry == mtxsymmetric && separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros;) {
+            if (rowidx[k] == colidx[k]) { csrad[rowidx[k]-1] += a[k++]; }
+            else {
+                idx_t i = rowidx[k]-1, j = colidx[k]-1;
+                csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k++]; rowptr[i]++;
+                csrcolidx[rowptr[j]] = i; csra[rowptr[j]] = a[k++]; rowptr[j]++;
             }
         }
         for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
         rowptr[0] = 0;
+    } else if (num_rows == num_columns && symmetry == mtxsymmetric && !separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros;) {
+            idx_t i = rowidx[k]-1, j = colidx[k]-1;
+            csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k++]; rowptr[i]++;
+            if (i != j) { csrcolidx[rowptr[j]] = i; csra[rowptr[j]] = a[k++]; rowptr[j]++; }
+        }
+        for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+        rowptr[0] = 0;
+    } else if (num_rows == num_columns && separate_diagonal) {
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            idx_t i = rowidx[k]-1, j = colidx[k]-1;
+            if (i == j) { csrad[i] += a[k]; }
+            else { csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k]; rowptr[i]++; }
+        }
+        for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
+        rowptr[0] = 0;
     } else {
+        /* simpler, serial version: */
+        /* for (int64_t k = 0; k < num_nonzeros; k++) { */
+        /*     idx_t i = rowidx[k]-1, j = colidx[k]-1; */
+        /*     csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k]; rowptr[i]++; */
+        /* } */
+        /* for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1]; */
+        /* rowptr[0] = 0; */
+
         int64_t * __restrict perm = malloc(num_nonzeros * sizeof(int64_t));
         if (!perm) { return errno; }
 #ifdef _OPENMP
@@ -1235,7 +1269,7 @@ int main(int argc, char *argv[])
     idx_t rowsizemin, rowsizemax;
     idx_t diagsize;
     err = csr_from_coo_size(
-        num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
+        symmetry, num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         csrrowptr, &csrsize, &rowsizemin, &rowsizemax, &diagsize,
         args.separate_diagonal, args.partition);
     if (err) {
@@ -1315,7 +1349,7 @@ int main(int argc, char *argv[])
     }
 #endif
     err = csr_from_coo(
-        num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
+        symmetry, num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         csrrowptr, csrsize, rowsizemin, rowsizemax, csrcolidx, csra, csrad,
         args.separate_diagonal, args.partition);
     if (err) {

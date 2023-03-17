@@ -1,5 +1,8 @@
 2023-03-17  James D. Trotter  <james@simula.no>
 
+	* csrspmv.c: allow symmetric matrices by adding two nonzeros to
+	the CSR representation for every off-diagonal nonzero
+
 	* csrspmv.c: add an option for precomputing first and final rows
 	for each thread for the load-balanced SpMV kernel (csrgemvnz)
 
