@@ -27,6 +27,11 @@
  *
  * History:
  *
+ *  1.3 - 2023-03-17:
+ *
+ *   - add an option for precomputing first and final rows for each
+ *     thread for the load-balanced SpMV kernel (csrgemvnz)
+ *
  *  1.2 - 2023-03-14:
  *
  *   - add a missing barrier for the CSR SpMV with balanced nonzeros
@@ -128,6 +133,7 @@ struct program_options
 #endif
     bool separate_diagonal;
     enum partition partition;
+    bool precompute_partition;
     int repeat;
     int verbose;
     int quiet;
@@ -147,6 +153,7 @@ static int program_options_init(
 #endif
     args->separate_diagonal = false;
     args->partition = partition_rows;
+    args->precompute_partition = false;
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
@@ -200,6 +207,7 @@ static void program_options_print_help(
 #ifdef _OPENMP
     fprintf(f, "  --partition-rows       partition rows evenly among threads (default)\n");
     fprintf(f, "  --partition-nonzeros   partition nonzeros evenly among threads\n");
+    fprintf(f, "  --precompute-partition perform per-thread partitioning once as a precomputation\n");
 #endif
     fprintf(f, "  --repeat=N             repeat matrix-vector multiplication N times\n");
     fprintf(f, "  -q, --quiet            do not print Matrix Market output\n");
@@ -422,6 +430,10 @@ static int parse_program_options(
         }
         if (strcmp(argv[0], "--partition-nonzeros") == 0) {
             args->partition = partition_nonzeros;
+            (*nargs)++; argv++; continue;
+        }
+        if (strcmp(argv[0], "--precompute-partition") == 0) {
+            args->precompute_partition = true;
             (*nargs)++; argv++; continue;
         }
 
@@ -985,19 +997,23 @@ static int csrgemvnz(
     const idx_t * __restrict colidx,
     const double * __restrict a,
     idx_t diagsize,
-    const double * __restrict ad)
+    const double * __restrict ad,
+    const idx_t * __restrict startrows,
+    const idx_t * __restrict endrows)
 {
 #ifdef _OPENMP
-    int num_threads = omp_get_num_threads();
+    int nthreads = omp_get_num_threads();
     int p = omp_get_thread_num();
-    int64_t num_nonzeros = rowptr[num_rows];
-    int64_t startnz = p*(num_nonzeros+num_threads-1)/num_threads;
-    int64_t endnz = (p+1)*(num_nonzeros+num_threads-1)/num_threads;
-    if (endnz > num_nonzeros) endnz = num_nonzeros;
-    int64_t startrow = 0;
-    while (startrow < num_rows && startnz > rowptr[startrow+1]) startrow++;
-    int64_t endrow = startrow;
-    while (endrow < num_rows && endnz-1 > rowptr[endrow+1]) endrow++;
+    int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+    int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+    if (endnz > csrsize) endnz = csrsize;
+    idx_t startrow = 0;
+    if (startrows) { startrow = startrows[p]; }
+    else { while (startrow < num_rows && startnz > rowptr[startrow+1]) startrow++; }
+    idx_t endrow = startrow;
+    if (endrows) { endrow = endrows[p]; }
+    else { while (endrow < num_rows && endnz-1 > rowptr[endrow+1]) endrow++; }
+    for (idx_t i = startrow; i < endrow; i++) y[i] = 0.0;
 
     if (startrow == endrow) {
         double yi = 0;
@@ -1312,6 +1328,59 @@ int main(int argc, char *argv[])
     }
     free(a); free(colidx); free(rowidx);
 
+    /* precompute per-thread partitioning of rows/nonzeros */
+    idx_t * startrows = NULL;
+    idx_t * endrows = NULL;
+#ifdef _OPENMP
+    if (args.partition == partition_nonzeros &&
+        args.precompute_partition)
+    {
+        #pragma omp parallel master
+        {
+            int nthreads = omp_get_num_threads();
+            startrows = malloc(nthreads * sizeof(idx_t));
+        }
+        if (!startrows) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+            free(csrad); free(csra); free(csrcolidx);
+            free(csrrowptr); free(a); free(colidx); free(rowidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        #pragma omp parallel master
+        {
+            int nthreads = omp_get_num_threads();
+            endrows = malloc(nthreads * sizeof(idx_t));
+        }
+        if (!endrows) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+            free(startrows);
+            free(csrad); free(csra); free(csrcolidx);
+            free(csrrowptr); free(a); free(colidx); free(rowidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+
+        #pragma omp parallel
+        {
+            int nthreads = omp_get_num_threads();
+            int p = omp_get_thread_num();
+            int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+            int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+            if (endnz > csrsize) endnz = csrsize;
+            idx_t startrow = 0;
+            while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
+            idx_t endrow = startrow;
+            while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+            startrows[p] = startrow;
+            endrows[p] = endrow;
+        }
+    }
+#endif
+
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
         fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRIdx" columns, %'"PRId64" nonzeros"
@@ -1348,10 +1417,12 @@ int main(int argc, char *argv[])
                 int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
                 int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
                 if (endnz > csrsize) endnz = csrsize;
-                int64_t startrow = 0;
-                while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
-                int64_t endrow = startrow;
-                while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+                idx_t startrow = 0;
+                if (startrows) { startrow = startrows[p]; }
+                else { while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++; }
+                idx_t endrow = startrow;
+                if (endrows) { endrow = endrows[p]; }
+                else { while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++; }
                 min_rows_per_thread = max_rows_per_thread = endrow - startrow;
                 min_nonzeros_per_thread = max_nonzeros_per_thread = csrsize/nthreads + (p < (csrsize % nthreads));
             }
@@ -1373,6 +1444,7 @@ int main(int argc, char *argv[])
     if (!x) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+        free(endrows); free(startrows);
         free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
         program_options_free(&args);
         return EXIT_FAILURE;
@@ -1398,7 +1470,9 @@ int main(int argc, char *argv[])
             if ((stream.f = fopen(args.xpath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.xpath, strerror(errno));
-                free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                free(x);
+                free(endrows); free(startrows);
+                free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1408,7 +1482,9 @@ int main(int argc, char *argv[])
             if ((stream.gzf = gzopen(args.xpath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.xpath, strerror(errno));
-                free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                free(x);
+                free(endrows); free(startrows);
+                free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1434,7 +1510,9 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.xpath, lines_read+1, strerror(err));
             stream_close(streamtype, stream);
-            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            free(x);
+            free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         } else if (object != mtxvector || format != mtxarray || xnum_rows != num_columns) {
@@ -1444,7 +1522,9 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.xpath, lines_read+1, num_columns);
             stream_close(streamtype, stream);
-            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            free(x);
+            free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
@@ -1456,7 +1536,9 @@ int main(int argc, char *argv[])
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.xpath, lines_read+1, strerror(err));
-            free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            free(x);
+            free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             stream_close(streamtype, stream);
             program_options_free(&args);
             return EXIT_FAILURE;
@@ -1481,10 +1563,12 @@ int main(int argc, char *argv[])
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
         free(x);
+        free(endrows); free(startrows);
         free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
+
 #ifdef _OPENMP
     if (args.partition == partition_rows) {
         #pragma omp parallel for
@@ -1497,10 +1581,12 @@ int main(int argc, char *argv[])
             int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
             int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
             if (endnz > csrsize) endnz = csrsize;
-            int64_t startrow = 0;
-            while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++;
-            int64_t endrow = startrow;
-            while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++;
+            idx_t startrow = 0;
+            if (startrows) { startrow = startrows[p]; }
+            else { while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++; }
+            idx_t endrow = startrow;
+            if (endrows) { endrow = endrows[p]; }
+            else { while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++; }
             for (idx_t i = startrow; i < endrow; i++) y[i] = 0.0;
         }
     }
@@ -1524,7 +1610,9 @@ int main(int argc, char *argv[])
             if ((stream.f = fopen(args.ypath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.ypath, strerror(errno));
-                free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                free(y); free(x);
+                free(endrows); free(startrows);
+                free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1534,7 +1622,9 @@ int main(int argc, char *argv[])
             if ((stream.gzf = gzopen(args.ypath, "r")) == NULL) {
                 fprintf(stderr, "%s: %s: %s\n",
                         program_invocation_short_name, args.ypath, strerror(errno));
-                free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+                free(y); free(x);
+                free(endrows); free(startrows);
+                free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
                 program_options_free(&args);
                 return EXIT_FAILURE;
             }
@@ -1560,7 +1650,9 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.ypath, lines_read+1, strerror(err));
             stream_close(streamtype, stream);
-            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            free(y); free(x);
+            free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         } else if (object != mtxvector || format != mtxarray || ynum_rows != num_rows) {
@@ -1570,7 +1662,9 @@ int main(int argc, char *argv[])
                     program_invocation_short_name,
                     args.ypath, lines_read+1, num_rows);
             stream_close(streamtype, stream);
-            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            free(y); free(x);
+            free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
@@ -1582,7 +1676,9 @@ int main(int argc, char *argv[])
             fprintf(stderr, "%s: %s:%"PRId64": %s\n",
                     program_invocation_short_name,
                     args.ypath, lines_read+1, strerror(err));
-            free(y); free(x); free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            free(y); free(x);
+            free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
             stream_close(streamtype, stream);
             program_options_free(&args);
             return EXIT_FAILURE;
@@ -1624,7 +1720,8 @@ int main(int argc, char *argv[])
             }
         } else if (args.partition == partition_nonzeros) {
             err = csrgemvnz(
-                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad);
+                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,
+                startrows, endrows);
             if (err) break;
         }
 
@@ -1652,11 +1749,13 @@ int main(int argc, char *argv[])
     if (err) {
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
         free(y); free(x);
+        free(endrows); free(startrows);
         free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
         program_options_free(&args);
         return EXIT_FAILURE;
     }
     free(x);
+    free(endrows); free(startrows);
     free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
 
     /* 6. write the result vector to a file */

@@ -1,3 +1,14 @@
+2023-03-17  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c: add an option for precomputing first and final rows
+	for each thread for the load-balanced SpMV kernel (csrgemvnz)
+
+2023-03-14  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c: add a missing barrier for the CSR SpMV with balanced
+	nonzeros (csrgemvnz) to ensure that the execution time and
+	performance is accurately displayed.
+
 2023-03-08  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c, ellspmv.c: use _OPENMP instead of WITH_OPENMP to
