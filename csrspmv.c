@@ -974,7 +974,7 @@ static int csrgemvsd(
 #endif
 
 #ifdef _OPENMP
-    #pragma omp for simd
+    #pragma omp for
 #endif
     for (idx_t i = 0; i < num_rows; i++) {
         double yi = 0;
