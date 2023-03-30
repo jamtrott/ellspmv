@@ -1,5 +1,5 @@
 This is the README file for csrspmv and ellspmv, programs for
-benchmarking sparse marix-vector multiplication (SpMV) for matrices in
+benchmarking sparse matrix-vector multiplication (SpMV) for matrices in
 CSR and ELLPACK format.
 
   Copyright (C) 2023 James D. Trotter
