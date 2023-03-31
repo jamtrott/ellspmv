@@ -27,10 +27,14 @@
  *
  * History:
  *
- *  1.3 - 2023-03-17:
+ *  1.4 - 2023-03-30:
+ *
+ *   - add an option for specifying the number of rows per thread
+ *
+ *  1.3 - 2023-03-30:
  *
  *   - allow symmetric matrices by adding two nonzeros to the CSR
-       representation for every off-diagonal nonzero
+ *     representation for every off-diagonal nonzero
  *
  *   - add an option for precomputing first and final rows for each
  *     thread for the load-balanced SpMV kernel (csrgemvnz)
@@ -107,7 +111,7 @@ typedef int64_t idx_t;
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.3";
+const char * program_version = "1.4";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -137,6 +141,8 @@ struct program_options
     bool separate_diagonal;
     enum partition partition;
     bool precompute_partition;
+    int rows_per_thread_size;
+    idx_t * rows_per_thread;
     int repeat;
     int verbose;
     int quiet;
@@ -157,6 +163,8 @@ static int program_options_init(
     args->separate_diagonal = false;
     args->partition = partition_rows;
     args->precompute_partition = false;
+    args->rows_per_thread_size = 0;
+    args->rows_per_thread = NULL;
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
@@ -170,6 +178,7 @@ static int program_options_init(
 static void program_options_free(
     struct program_options * args)
 {
+    if (args->rows_per_thread) free(args->rows_per_thread);
     if (args->ypath) free(args->ypath);
     if (args->xpath) free(args->xpath);
     if (args->Apath) free(args->Apath);
@@ -206,18 +215,19 @@ static void program_options_print_help(
 #ifdef HAVE_LIBZ
     fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
 #endif
-    fprintf(f, "  --separate-diagonal    store diagonal nonzeros separately\n");
+    fprintf(f, "  --separate-diagonal     store diagonal nonzeros separately\n");
 #ifdef _OPENMP
-    fprintf(f, "  --partition-rows       partition rows evenly among threads (default)\n");
-    fprintf(f, "  --partition-nonzeros   partition nonzeros evenly among threads\n");
-    fprintf(f, "  --precompute-partition perform per-thread partitioning once as a precomputation\n");
+    fprintf(f, "  --partition-rows        partition rows evenly among threads (default)\n");
+    fprintf(f, "  --partition-nonzeros    partition nonzeros evenly among threads\n");
+    fprintf(f, "  --precompute-partition  perform per-thread partitioning once as a precomputation\n");
+    fprintf(f, "  --rows-per-thread=N..   comma-separated list of number of rows assigned to threads\n");
 #endif
-    fprintf(f, "  --repeat=N             repeat matrix-vector multiplication N times\n");
-    fprintf(f, "  -q, --quiet            do not print Matrix Market output\n");
-    fprintf(f, "  -v, --verbose          be more verbose\n");
+    fprintf(f, "  --repeat=N              repeat matrix-vector multiplication N times\n");
+    fprintf(f, "  -q, --quiet             do not print Matrix Market output\n");
+    fprintf(f, "  -v, --verbose           be more verbose\n");
     fprintf(f, "\n");
-    fprintf(f, "  -h, --help             display this help and exit\n");
-    fprintf(f, "  --version              display version information and exit\n");
+    fprintf(f, "  -h, --help              display this help and exit\n");
+    fprintf(f, "  --version               display version information and exit\n");
     fprintf(f, "\n");
     fprintf(f, "Report bugs to: <james@simula.no>\n");
 }
@@ -427,6 +437,7 @@ static int parse_program_options(
             (*nargs)++; argv++; continue;
         }
 
+#ifdef _OPENMP
         if (strcmp(argv[0], "--partition-rows") == 0) {
             args->partition = partition_rows;
             (*nargs)++; argv++; continue;
@@ -440,16 +451,40 @@ static int parse_program_options(
             (*nargs)++; argv++; continue;
         }
 
-        if (strcmp(argv[0], "--repeat") == 0) {
-            if (argc - *nargs < 2) { program_options_free(args); return EINVAL; }
-            (*nargs)++; argv++;
-            err = parse_int(&args->repeat, argv[0], NULL, NULL);
-            if (err) { program_options_free(args); return err; }
+        if (strstr(argv[0], "--rows-per-thread") == argv[0]) {
+            int n = strlen("--rows-per-thread");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            args->rows_per_thread_size = 1;
+            const char * t = s;
+            while (*t != '\0') { if (*t == ',') { args->rows_per_thread_size++; } t++; }
+            if (args->rows_per_thread) free(args->rows_per_thread);
+            args->rows_per_thread = malloc(args->rows_per_thread_size * sizeof(idx_t));
+            if (!args->rows_per_thread) return errno;
+            int i = 0;
+            while (true) {
+                if (i >= args->rows_per_thread_size) { program_options_free(args); return EINVAL; }
+                err = parse_idx_t(&args->rows_per_thread[i++], s, (char **) &t, NULL);
+                if (err) { program_options_free(args); return EINVAL; }
+                if (s == t) { program_options_free(args); return EINVAL; }
+                else if (*t == '\0') break;
+                else if (*t != ',') { program_options_free(args); return EINVAL; }
+                s = t+1;
+            }
             (*nargs)++; argv++; continue;
-        } else if (strstr(argv[0], "--repeat=") == argv[0]) {
-            err = parse_int(
-                &args->repeat, argv[0] + strlen("--repeat="), NULL, NULL);
-            if (err) { program_options_free(args); return err; }
+        }
+#endif
+
+        if (strstr(argv[0], "--repeat") == argv[0]) {
+            int n = strlen("--repeat");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            err = parse_int(&args->repeat, s, (char **) &s, NULL);
+            if (err || *s != '\0') { program_options_free(args); return EINVAL; }
             (*nargs)++; argv++; continue;
         }
 
@@ -1019,6 +1054,56 @@ static int csrgemvsd(
     return 0;
 }
 
+static int csrgemvrp(
+    idx_t num_rows,
+    double * __restrict y,
+    idx_t num_columns,
+    const double * __restrict x,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    const int64_t * __restrict rowptr,
+    const idx_t * __restrict colidx,
+    const double * __restrict a,
+    idx_t diagsize,
+    const double * __restrict ad,
+    const idx_t * __restrict startrows,
+    const idx_t * __restrict endrows)
+{
+#ifdef _OPENMP
+    if (ad && diagsize > 0) {
+        int p = omp_get_thread_num();
+        for (idx_t i = startrows[p]; i < endrows[p]; i++) {
+            double yi = 0;
+            for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
+                yi += a[k] * x[colidx[k]];
+            y[i] += ad[i]*x[i] + yi;
+        }
+        #pragma omp barrier
+    } else {
+        int p = omp_get_thread_num();
+        for (idx_t i = startrows[p]; i < endrows[p]; i++) {
+            double yi = 0;
+            for (int64_t k = rowptr[i]; k < rowptr[i+1]; k++)
+                yi += a[k] * x[colidx[k]];
+            y[i] += yi;
+        }
+        #pragma omp barrier
+    }
+    return 0;
+#else
+    if (ad) {
+        return csrgemvsd(
+            num_rows, y, num_columns, x, csrsize,
+            rowsizemin, rowsizemax, rowptr, colidx, a, ad);
+    } else {
+        return csrgemv(
+            num_rows, y, num_columns, x, csrsize,
+            rowsizemin, rowsizemax, rowptr, colidx, a);
+    }
+#endif
+}
+
 static int csrgemvnz(
     idx_t num_rows,
     double * __restrict y,
@@ -1279,95 +1364,13 @@ int main(int argc, char *argv[])
         program_options_free(&args);
         return EXIT_FAILURE;
     }
-#ifdef HAVE_ALIGNED_ALLOC
-    size_t csrcolidxsize = csrsize*sizeof(idx_t);
-    idx_t * csrcolidx = aligned_alloc(pagesize, csrcolidxsize + pagesize - csrcolidxsize % pagesize);
-#else
-    idx_t * csrcolidx = malloc(csrsize * sizeof(idx_t));
-#endif
-    if (!csrcolidx) {
-        if (args.verbose > 0) fprintf(stderr, "\n");
-        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(csrrowptr); free(a); free(colidx); free(rowidx);
-        program_options_free(&args);
-        return EXIT_FAILURE;
-    }
-#ifdef _OPENMP
-    if (args.partition == partition_rows) {
-        #pragma omp parallel for
-        for (idx_t i = 0; i < num_rows; i++) {
-            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
-                csrcolidx[k] = 0;
-        }
-    } else if (args.partition == partition_nonzeros) {
-        #pragma omp parallel for
-        for (int64_t k = 0; k < csrsize; k++) csrcolidx[k] = 0;
-    }
-#endif
-#ifdef HAVE_ALIGNED_ALLOC
-    size_t csrasize = csrsize*sizeof(double);
-    double * csra = aligned_alloc(pagesize, csrasize + pagesize - csrasize % pagesize);
-#else
-    double * csra = malloc(csrsize * sizeof(double));
-#endif
-    if (!csra) {
-        if (args.verbose > 0) fprintf(stderr, "\n");
-        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(csrcolidx);
-        free(csrrowptr); free(a); free(colidx); free(rowidx);
-        program_options_free(&args);
-        return EXIT_FAILURE;
-    }
-#ifdef HAVE_ALIGNED_ALLOC
-    size_t csradsize = diagsize*sizeof(double);
-    double * csrad = aligned_alloc(pagesize, csradsize + pagesize - csradsize % pagesize);
-#else
-    double * csrad = malloc(diagsize * sizeof(double));
-#endif
-    if (!csrad) {
-        if (args.verbose > 0) fprintf(stderr, "\n");
-        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-        free(csra); free(csrcolidx);
-        free(csrrowptr); free(a); free(colidx); free(rowidx);
-        program_options_free(&args);
-        return EXIT_FAILURE;
-    }
-#ifdef _OPENMP
-    if (diagsize > 0) {
-        #pragma omp parallel for
-        for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
-    }
-    if (args.partition == partition_rows) {
-        #pragma omp parallel for
-        for (idx_t i = 0; i < num_rows; i++) {
-            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
-                csra[k] = 0;
-        }
-    } else if (args.partition == partition_nonzeros) {
-        #pragma omp parallel for
-        for (int64_t k = 0; k < csrsize; k++) csra[k] = 0;
-    }
-#endif
-    err = csr_from_coo(
-        symmetry, num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
-        csrrowptr, csrsize, rowsizemin, rowsizemax, csrcolidx, csra, csrad,
-        args.separate_diagonal, args.partition);
-    if (err) {
-        if (args.verbose > 0) fprintf(stderr, "\n");
-        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
-        free(csrad); free(csra); free(csrcolidx);
-        free(csrrowptr); free(a); free(colidx); free(rowidx);
-        program_options_free(&args);
-        return EXIT_FAILURE;
-    }
-    free(a); free(colidx); free(rowidx);
 
     /* precompute per-thread partitioning of rows/nonzeros */
     idx_t * startrows = NULL;
     idx_t * endrows = NULL;
 #ifdef _OPENMP
-    if (args.partition == partition_nonzeros &&
-        args.precompute_partition)
+    if (args.partition == partition_rows && args.rows_per_thread ||
+        args.partition == partition_nonzeros && args.precompute_partition)
     {
         #pragma omp parallel master
         {
@@ -1377,12 +1380,10 @@ int main(int argc, char *argv[])
         if (!startrows) {
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
-            free(csrad); free(csra); free(csrcolidx);
             free(csrrowptr); free(a); free(colidx); free(rowidx);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
-
         #pragma omp parallel master
         {
             int nthreads = omp_get_num_threads();
@@ -1392,12 +1393,46 @@ int main(int argc, char *argv[])
             if (args.verbose > 0) fprintf(stderr, "\n");
             fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
             free(startrows);
-            free(csrad); free(csra); free(csrcolidx);
             free(csrrowptr); free(a); free(colidx); free(rowidx);
             program_options_free(&args);
             return EXIT_FAILURE;
         }
+    }
 
+    if (args.partition == partition_rows && args.rows_per_thread) {
+        int nthreads;
+        #pragma omp parallel master
+        {
+            nthreads = omp_get_num_threads();
+            if (nthreads > 0) startrows[0] = 0;
+            if (nthreads > 0) endrows[0] = args.rows_per_thread > 0 ? args.rows_per_thread[0] : 0;
+            for (int p = 1; p < nthreads; p++) {
+                startrows[p] = endrows[p-1];
+                if (p < args.rows_per_thread_size) endrows[p] = startrows[p] + args.rows_per_thread[p];
+                else endrows[p] = startrows[p];
+            }
+        }
+        if (args.rows_per_thread_size != nthreads) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: warning: --rows-per-thread does not match the number of threads (%d)\n",
+                    program_invocation_short_name, nthreads);
+        }
+        if (nthreads > 0 && endrows[nthreads-1] > num_rows) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: %s: the sum of --rows-per-thread (%'"PRIdx") exceeds the number of rows (%'"PRIdx")\n",
+                    program_invocation_short_name, strerror(EINVAL), endrows[nthreads-1], num_rows);
+            free(endrows); free(startrows);
+            free(csrrowptr); free(a); free(colidx); free(rowidx);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        } else if (nthreads > 0 && endrows[nthreads-1] < num_rows) {
+            if (args.verbose > 0) fprintf(stderr, "\n");
+            fprintf(stderr, "%s: warning: the sum of --rows-per-thread (%'"PRIdx") is less than the number of rows (%'"PRIdx")\n",
+                    program_invocation_short_name, endrows[nthreads-1], num_rows);
+        }
+    } else if (args.partition == partition_nonzeros &&
+               args.precompute_partition)
+    {
         #pragma omp parallel
         {
             int nthreads = omp_get_num_threads();
@@ -1415,6 +1450,118 @@ int main(int argc, char *argv[])
     }
 #endif
 
+#ifdef HAVE_ALIGNED_ALLOC
+    size_t csrcolidxsize = csrsize*sizeof(idx_t);
+    idx_t * csrcolidx = aligned_alloc(pagesize, csrcolidxsize + pagesize - csrcolidxsize % pagesize);
+#else
+    idx_t * csrcolidx = malloc(csrsize * sizeof(idx_t));
+#endif
+    if (!csrcolidx) {
+        if (args.verbose > 0) fprintf(stderr, "\n");
+        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+        free(endrows); free(startrows);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
+        program_options_free(&args);
+        return EXIT_FAILURE;
+    }
+#ifdef _OPENMP
+    if (args.partition == partition_rows && !args.rows_per_thread) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) {
+            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                csrcolidx[k] = 0;
+        }
+    } else if (args.partition == partition_rows) {
+        #pragma omp parallel
+        {
+            int p = omp_get_thread_num();
+            for (idx_t i = startrows[p]; i < endrows[p]; i++) {
+                for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                    csrcolidx[k] = 0;
+            }
+        }
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel for
+        for (int64_t k = 0; k < csrsize; k++) csrcolidx[k] = 0;
+    }
+#endif
+#ifdef HAVE_ALIGNED_ALLOC
+    size_t csrasize = csrsize*sizeof(double);
+    double * csra = aligned_alloc(pagesize, csrasize + pagesize - csrasize % pagesize);
+#else
+    double * csra = malloc(csrsize * sizeof(double));
+#endif
+    if (!csra) {
+        if (args.verbose > 0) fprintf(stderr, "\n");
+        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+        free(csrcolidx);
+        free(endrows); free(startrows);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
+        program_options_free(&args);
+        return EXIT_FAILURE;
+    }
+#ifdef HAVE_ALIGNED_ALLOC
+    size_t csradsize = diagsize*sizeof(double);
+    double * csrad = aligned_alloc(pagesize, csradsize + pagesize - csradsize % pagesize);
+#else
+    double * csrad = malloc(diagsize * sizeof(double));
+#endif
+    if (!csrad) {
+        if (args.verbose > 0) fprintf(stderr, "\n");
+        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+        free(csra); free(csrcolidx);
+        free(endrows); free(startrows);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
+        program_options_free(&args);
+        return EXIT_FAILURE;
+    }
+#ifdef _OPENMP
+    if (args.partition == partition_rows && !args.rows_per_thread) {
+        #pragma omp parallel for
+        for (idx_t i = 0; i < num_rows; i++) {
+            for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                csra[k] = 0;
+        }
+        if (diagsize > 0) {
+            #pragma omp parallel for
+            for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
+        }
+    } else if (args.partition == partition_rows) {
+        #pragma omp parallel
+        {
+            int p = omp_get_thread_num();
+            for (idx_t i = startrows[p]; i < endrows[p]; i++) {
+                for (int64_t k = csrrowptr[i]; k < csrrowptr[i+1]; k++)
+                    csra[k] = 0;
+            }
+            if (diagsize > 0) {
+                for (idx_t i = startrows[p]; i < endrows[p]; i++) csrad[i] = 0;
+            }
+        }
+    } else if (args.partition == partition_nonzeros) {
+        #pragma omp parallel for
+        for (int64_t k = 0; k < csrsize; k++) csra[k] = 0;
+        if (diagsize > 0) {
+            #pragma omp parallel for
+            for (idx_t i = 0; i < num_rows; i++) csrad[i] = 0;
+        }
+    }
+#endif
+    err = csr_from_coo(
+        symmetry, num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
+        csrrowptr, csrsize, rowsizemin, rowsizemax, csrcolidx, csra, csrad,
+        args.separate_diagonal, args.partition);
+    if (err) {
+        if (args.verbose > 0) fprintf(stderr, "\n");
+        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
+        free(csrad); free(csra); free(csrcolidx);
+        free(endrows); free(startrows);
+        free(csrrowptr); free(a); free(colidx); free(rowidx);
+        program_options_free(&args);
+        return EXIT_FAILURE;
+    }
+    free(a); free(colidx); free(rowidx);
+
     if (args.verbose > 0) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
         fprintf(stderr, "%'.6f seconds, %'"PRIdx" rows, %'"PRIdx" columns, %'"PRId64" nonzeros"
@@ -1426,7 +1573,7 @@ int main(int argc, char *argv[])
         idx_t max_rows_per_thread = 0;
         int64_t min_nonzeros_per_thread = INT64_MAX;
         int64_t max_nonzeros_per_thread = 0;
-        if (args.partition == partition_rows) {
+        if (args.partition == partition_rows && !args.rows_per_thread) {
             #pragma omp parallel \
                 reduction(min:min_rows_per_thread) reduction(max:max_rows_per_thread) \
                 reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
@@ -1437,6 +1584,22 @@ int main(int argc, char *argv[])
                 int64_t num_nonzeros = 0;
                 #pragma omp for
                 for (int i = 0; i < num_rows; i++)
+                    num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
+                min_nonzeros_per_thread = num_nonzeros;
+                max_nonzeros_per_thread = num_nonzeros;
+            }
+        } else if (args.partition == partition_rows) {
+            #pragma omp parallel \
+                reduction(min:min_rows_per_thread) reduction(max:max_rows_per_thread) \
+                reduction(min:min_nonzeros_per_thread) reduction(max:max_nonzeros_per_thread)
+            {
+                nthreads = omp_get_num_threads();
+                int p = omp_get_thread_num();
+                idx_t startrow = startrows[p];
+                idx_t endrow = endrows[p];
+                min_rows_per_thread = max_rows_per_thread = endrow - startrow;
+                int64_t num_nonzeros = 0;
+                for (idx_t i = startrows[p]; i < endrows[p]; i++)
                     num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
                 min_nonzeros_per_thread = num_nonzeros;
                 max_nonzeros_per_thread = num_nonzeros;
@@ -1604,9 +1767,20 @@ int main(int argc, char *argv[])
     }
 
 #ifdef _OPENMP
-    if (args.partition == partition_rows) {
+    if (args.partition == partition_rows && !args.rows_per_thread) {
         #pragma omp parallel for
         for (idx_t i = 0; i < num_rows; i++) y[i] = 0.0;
+    } else if (args.partition == partition_rows) {
+        #pragma omp parallel
+        {
+            int p = omp_get_thread_num();
+            for (idx_t i = startrows[p]; i < endrows[p]; i++) y[i] = 0.0;
+        }
+        #pragma omp parallel master
+        {
+            int nthreads = omp_get_num_threads();
+            for (idx_t i = endrows[nthreads-1]; i < num_rows; i++) y[i] = 0;
+        }
     } else if (args.partition == partition_nonzeros) {
         #pragma omp parallel
         {
@@ -1742,7 +1916,7 @@ int main(int argc, char *argv[])
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
-        if (args.partition == partition_rows) {
+        if (args.partition == partition_rows && !args.rows_per_thread) {
             if (args.separate_diagonal) {
                 err = csrgemvsd(
                     num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, csrad);
@@ -1752,6 +1926,11 @@ int main(int argc, char *argv[])
                     num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra);
                 if (err) break;
             }
+        } else if (args.partition == partition_rows) {
+            err = csrgemvrp(
+                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,
+                startrows, endrows);
+            if (err) break;
         } else if (args.partition == partition_nonzeros) {
             err = csrgemvnz(
                 num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,

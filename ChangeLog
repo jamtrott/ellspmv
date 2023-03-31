@@ -1,3 +1,8 @@
+2023-03-31  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c: add an option for explicitly specifying the number of
+	rows per thread
+
 2023-03-17  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c: allow symmetric matrices by adding two nonzeros to
