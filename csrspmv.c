@@ -27,9 +27,11 @@
  *
  * History:
  *
- *  1.4 - 2023-03-30:
+ *  1.4 - 2023-04-01:
  *
  *   - add options for specifying the number of rows/columns per thread
+ *
+ *   - fix bug in converting symmetric matrices to CSR
  *
  *  1.3 - 2023-03-30:
  *
@@ -972,21 +974,21 @@ static int csr_from_coo(
     enum partition partition)
 {
     if (num_rows == num_columns && symmetry == mtxsymmetric && separate_diagonal) {
-        for (int64_t k = 0; k < num_nonzeros;) {
-            if (rowidx[k] == colidx[k]) { csrad[rowidx[k]-1] += a[k++]; }
+        for (int64_t k = 0; k < num_nonzeros; k++) {
+            if (rowidx[k] == colidx[k]) { csrad[rowidx[k]-1] += a[k]; }
             else {
                 idx_t i = rowidx[k]-1, j = colidx[k]-1;
-                csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k++]; rowptr[i]++;
-                csrcolidx[rowptr[j]] = i; csra[rowptr[j]] = a[k++]; rowptr[j]++;
+                csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k]; rowptr[i]++;
+                csrcolidx[rowptr[j]] = i; csra[rowptr[j]] = a[k]; rowptr[j]++;
             }
         }
         for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
         rowptr[0] = 0;
     } else if (num_rows == num_columns && symmetry == mtxsymmetric && !separate_diagonal) {
-        for (int64_t k = 0; k < num_nonzeros;) {
+        for (int64_t k = 0; k < num_nonzeros; k++) {
             idx_t i = rowidx[k]-1, j = colidx[k]-1;
-            csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k++]; rowptr[i]++;
-            if (i != j) { csrcolidx[rowptr[j]] = i; csra[rowptr[j]] = a[k++]; rowptr[j]++; }
+            csrcolidx[rowptr[i]] = j; csra[rowptr[i]] = a[k]; rowptr[i]++;
+            if (i != j) { csrcolidx[rowptr[j]] = i; csra[rowptr[j]] = a[k]; rowptr[j]++; }
         }
         for (idx_t i = num_rows; i > 0; i--) rowptr[i] = rowptr[i-1];
         rowptr[0] = 0;

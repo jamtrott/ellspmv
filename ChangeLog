@@ -1,3 +1,8 @@
+2023-04-01  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c (csr_from_coo): fix bug in converting symmetric
+	matrices to CSR
+
 2023-03-31  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c: add an option for explicitly specifying the number of
