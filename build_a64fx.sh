@@ -6,5 +6,4 @@
 #
 #################################################
 
-export NO_OPENMP=1
-CC=fcc CFLAGS="-Kfast -Kocl -Kopenmp -Koptmsg=2 -DA64FXCPU -DL2WAYS=4" make
+CC=fcc CFLAGS="-Kfast -Kocl -Kopenmp -Koptmsg=2 -DUSE_A64FX_SECTOR_CACHE -DA64FX_SECTOR_CACHE_L2_WAYS=4" make

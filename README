@@ -19,6 +19,38 @@ an example:
 
      make CC=gcc CFLAGS="-O3 -march=native"
 
+Furthermore, the following preprocessor macros can be used to control
+various options:
+
+ - If IDXTYPEWIDTH is not set, then values of type `int' are used to
+   index matrix rows and columns. Otherwise, IDXTYPEWIDTH may be set
+   to either 32 or 64 to force the use of 32-bit or 64-bit integers,
+   respectively.
+
+ - If HAVE_LIBZ is set, then support for reading gzip-compressed
+   Matrix Market files is included. Note that it is necessary to link
+   with libz, e.g., by adding `-lz' to LDFLAGS.
+
+ - If HAVE_ALIGNED_ALLOC is set, then memory allocations are aligned
+   to a page.
+
+ - If USE_A64FX_SECTOR_CACHE is set and the Fujitsu C compiler is
+   used, then the sector cache feature of the Fujitsu A64FX processor
+   is configured to isolate streaming and non-streaming data to
+   different cache partitions. The number of ways in the L1 and L2
+   caches that are allocated to streaming data may be configured by
+   setting A64FX_SECTOR_CACHE_L1_WAYS and A64FX_SECTOR_CACHE_L2_WAYS,
+   respectively. By default, A64FX_SECTOR_CACHE_L1_WAYS is not set,
+   and the L1 cache partitioning is not used, whereas
+   A64FX_SECTOR_CACHE_L2_WAYS defaults to 4 out of 16 ways.
+
+   To use the sector cache feature, it is also necessary to set the
+   environment variables FLIB_HPCFUNC=TRUE and FLIB_SCCR_CNTL=TRUE at
+   runtime. It is also recommended to set FLIB_L1_SCCR_CNTL=FALSE,
+   which will result in an error if the L2 sector cache is
+   unavailable.
+
+
 Usage
 -----
 
@@ -44,21 +76,21 @@ where AVX-512 is used for vectorisation. First, we compile the code
 with GCC 11.2.0. Using the option `-fopt-info-vec', we get some extra
 information that shows where vectorization is applied:
 
-	    $ make CC=gcc-11 CFLAGS="-march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp"
-	    gcc-11 -c -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp ellspmv.c -o ellspmv.o
-	    ellspmv.c:773:44: optimized: loop vectorized using 64 byte vectors
-	    ellspmv.c:773:44: optimized: loop vectorized using 32 byte vectors
-	    ellspmv.c:548:14: optimized: loop vectorized using 64 byte vectors
-	    ellspmv.c:548:14: optimized: loop vectorized using 32 byte vectors
-	    ellspmv.c:525:27: optimized: loop vectorized using 64 byte vectors
-	    ellspmv.c:525:27: optimized: loop vectorized using 32 byte vectors
-	    ellspmv.c:501:35: optimized: loop vectorized using 64 byte vectors
-	    ellspmv.c:501:35: optimized: loop vectorized using 32 byte vectors
-	    ellspmv.c:710:13: optimized: basic block part vectorized using 64 byte vectors
-	    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
-	    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
-	    ellspmv.c:791:13: optimized: basic block part vectorized using 64 byte vectors
-	    gcc-11 -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp ellspmv.o  -o ellspmv
+    $ make CC=gcc-11 CFLAGS="-march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp"
+    gcc-11 -c -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp ellspmv.c -o ellspmv.o
+    ellspmv.c:773:44: optimized: loop vectorized using 64 byte vectors
+    ellspmv.c:773:44: optimized: loop vectorized using 32 byte vectors
+    ellspmv.c:548:14: optimized: loop vectorized using 64 byte vectors
+    ellspmv.c:548:14: optimized: loop vectorized using 32 byte vectors
+    ellspmv.c:525:27: optimized: loop vectorized using 64 byte vectors
+    ellspmv.c:525:27: optimized: loop vectorized using 32 byte vectors
+    ellspmv.c:501:35: optimized: loop vectorized using 64 byte vectors
+    ellspmv.c:501:35: optimized: loop vectorized using 32 byte vectors
+    ellspmv.c:710:13: optimized: basic block part vectorized using 64 byte vectors
+    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
+    ellspmv.c:735:13: optimized: basic block part vectorized using 64 byte vectors
+    ellspmv.c:791:13: optimized: basic block part vectorized using 64 byte vectors
+    gcc-11 -march=native -O3 -fopt-info-vec -ffast-math -mprefer-vector-width=512 -fopenmp ellspmv.o  -o ellspmv
 
 Next, we test the matrix-vector multiplication on a large matrix with
 16 nonzeros per row. With standard OpenMP environment variables, we

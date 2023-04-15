@@ -27,6 +27,10 @@
  *
  * History:
  *
+ *  1.5 - 2023-04-15:
+ *
+ *   - minor fixes to A64FX sector cache configuration
+ *
  *  1.4 - 2023-04-01:
  *
  *   - add options for specifying the number of rows/columns per thread
@@ -112,8 +116,14 @@ typedef int64_t idx_t;
 #define parse_idx_t parse_int64_t
 #endif
 
+#ifdef USE_A64FX_SECTOR_CACHE
+#ifndef A64FX_SECTOR_CACHE_L2_WAYS
+#define A64FX_SECTOR_CACHE_L2_WAYS 4
+#endif
+#endif
+
 const char * program_name = "csrspmv";
-const char * program_version = "1.4";
+const char * program_version = "1.5";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -264,7 +274,13 @@ static void program_options_print_version(
     fprintf(f, "page-aligned allocations: no\n");
 #endif
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    fprintf(f, "Fujitsu A64FX sector cache support enabled (L2 ways: %d)\n", L2WAYS);
+    fprintf(f, "Fujitsu A64FX sector cache support enabled (L1 ways: ");
+#ifndef A64FX_SECTOR_CACHE_L1_WAYS
+    fprintf(f, "disabled");
+#else
+    fprintf(f, "%d", A64FX_SECTOR_CACHE_L1_WAYS);
+#endif
+    fprintf(f, ", L2 ways: %d)\n", A64FX_SECTOR_CACHE_L2_WAYS);
 #endif
     fprintf(f, "\n");
     fprintf(f, "%s\n", program_copyright);
@@ -1045,6 +1061,15 @@ static int csrgemv(
     const idx_t * __restrict colidx,
     const double * __restrict a)
 {
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+    #pragma procedure scache_isolate_assign a, colidx
+#endif
+
 #ifdef _OPENMP
     #pragma omp for simd
 #endif
@@ -1071,8 +1096,12 @@ static int csrgemvsd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_way L2=L2WAYS
-    #pragma procedure scache_isolate_assign a, colidx
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+    #pragma procedure scache_isolate_assign a, ad, colidx
 #endif
 
 #ifdef _OPENMP
@@ -1407,7 +1436,8 @@ int main(int argc, char *argv[])
     if (args.partition == partition_rows && args.rows_per_thread ||
         args.partition == partition_nonzeros && args.precompute_partition)
     {
-        #pragma omp parallel master
+        #pragma omp parallel
+        #pragma omp master
         {
             int nthreads = omp_get_num_threads();
             startrows = malloc(nthreads * sizeof(idx_t));
@@ -1419,7 +1449,8 @@ int main(int argc, char *argv[])
             program_options_free(&args);
             return EXIT_FAILURE;
         }
-        #pragma omp parallel master
+        #pragma omp parallel
+        #pragma omp master
         {
             int nthreads = omp_get_num_threads();
             endrows = malloc(nthreads * sizeof(idx_t));
@@ -1435,7 +1466,8 @@ int main(int argc, char *argv[])
     }
     if (args.partition == partition_rows && args.columns_per_thread)
     {
-        #pragma omp parallel master
+        #pragma omp parallel
+        #pragma omp master
         {
             int nthreads = omp_get_num_threads();
             startcolumns = malloc(nthreads * sizeof(idx_t));
@@ -1448,7 +1480,8 @@ int main(int argc, char *argv[])
             program_options_free(&args);
             return EXIT_FAILURE;
         }
-        #pragma omp parallel master
+        #pragma omp parallel
+        #pragma omp master
         {
             int nthreads = omp_get_num_threads();
             endcolumns = malloc(nthreads * sizeof(idx_t));
@@ -1465,7 +1498,8 @@ int main(int argc, char *argv[])
 
     if (args.partition == partition_rows && args.rows_per_thread) {
         int nthreads;
-        #pragma omp parallel master
+        #pragma omp parallel
+        #pragma omp master
         {
             nthreads = omp_get_num_threads();
             if (nthreads > 0) startrows[0] = 0;
@@ -1515,7 +1549,8 @@ int main(int argc, char *argv[])
 
     if (args.partition == partition_rows && args.columns_per_thread) {
         int nthreads;
-        #pragma omp parallel master
+        #pragma omp parallel
+        #pragma omp master
         {
             nthreads = omp_get_num_threads();
             if (nthreads > 0) startcolumns[0] = 0;
@@ -1750,10 +1785,8 @@ int main(int argc, char *argv[])
         {
             int p = omp_get_thread_num();
             for (idx_t i = startcolumns[p]; i < endcolumns[p]; i++) x[i] = 1.0;
-        }
-        #pragma omp parallel master
-        {
             int nthreads = omp_get_num_threads();
+            #pragma omp master
             for (idx_t i = endcolumns[nthreads-1]; i < num_columns; i++) x[i] = 1.0;
         }
     } else if (args.partition == partition_rows && args.rows_per_thread &&
@@ -1763,10 +1796,8 @@ int main(int argc, char *argv[])
         {
             int p = omp_get_thread_num();
             for (idx_t i = startrows[p]; i < endrows[p]; i++) x[i] = 1.0;
-        }
-        #pragma omp parallel master
-        {
             int nthreads = omp_get_num_threads();
+            #pragma omp master
             for (idx_t i = endrows[nthreads-1]; i < num_rows; i++) x[i] = 1.0;
         }
     } else {
@@ -1901,10 +1932,8 @@ int main(int argc, char *argv[])
         {
             int p = omp_get_thread_num();
             for (idx_t i = startrows[p]; i < endrows[p]; i++) y[i] = 0.0;
-        }
-        #pragma omp parallel master
-        {
             int nthreads = omp_get_num_threads();
+            #pragma omp master
             for (idx_t i = endrows[nthreads-1]; i < num_rows; i++) y[i] = 0;
         }
     } else if (args.partition == partition_nonzeros) {

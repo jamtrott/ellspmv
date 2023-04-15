@@ -27,6 +27,10 @@
  *
  * History:
  *
+ *  1.4 - 2023-04-15:
+ *
+ *   - minor fixes to A64FX sector cache configuration
+ *
  *  1.3 - 2023-03-01:
  *
  *   - add option for reading gzip-compressed Matrix Market files
@@ -80,19 +84,31 @@
 #ifndef IDXTYPEWIDTH
 typedef int idx_t;
 #define PRIdx "d"
+#define IDX_T_MIN INT_MIN
+#define IDX_T_MAX INT_MAX
 #define parse_idx_t parse_int
 #elif IDXTYPEWIDTH == 32
 typedef int32_t idx_t;
 #define PRIdx PRId32
+#define IDX_T_MIN INT32_MIN
+#define IDX_T_MAX INT32_MAX
 #define parse_idx_t parse_int32_t
 #elif IDXTYPEWIDTH == 64
 typedef int64_t idx_t;
 #define PRIdx PRId64
+#define IDX_T_MIN INT64_MIN
+#define IDX_T_MAX INT64_MAX
 #define parse_idx_t parse_int64_t
 #endif
 
+#ifdef USE_A64FX_SECTOR_CACHE
+#ifndef A64FX_SECTOR_CACHE_L2_WAYS
+#define A64FX_SECTOR_CACHE_L2_WAYS 4
+#endif
+#endif
+
 const char * program_name = "ellspmv";
-const char * program_version = "1.3";
+const char * program_version = "1.4";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -216,7 +232,13 @@ static void program_options_print_version(
     fprintf(f, "page-aligned allocations: no\n");
 #endif
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    fprintf(f, "Fujitsu A64FX sector cache support enabled (L2 ways: %d)\n", L2WAYS);
+    fprintf(f, "Fujitsu A64FX sector cache support enabled (L1 ways: ");
+#ifndef A64FX_SECTOR_CACHE_L1_WAYS
+    fprintf(f, "disabled");
+#else
+    fprintf(f, "%d", A64FX_SECTOR_CACHE_L1_WAYS);
+#endif
+    fprintf(f, ", L2 ways: %d)\n", A64FX_SECTOR_CACHE_L2_WAYS);
 #endif
     fprintf(f, "\n");
     fprintf(f, "%s\n", program_copyright);
@@ -872,6 +894,15 @@ static int ellgemv(
     const idx_t * __restrict colidx,
     const double * __restrict a)
 {
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+    #pragma procedure scache_isolate_assign a, colidx
+#endif
+
 #ifdef _OPENMP
     #pragma omp for simd
 #endif
@@ -896,8 +927,12 @@ static int ellgemvsd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_way L2=L2WAYS
-    #pragma procedure scache_isolate_assign a, colidx
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+    #pragma procedure scache_isolate_assign a, ad, colidx
 #endif
 
 #ifdef _OPENMP
@@ -924,8 +959,12 @@ static int ellgemv16sd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_way L2=L2WAYS
-    #pragma procedure scache_isolate_assign a, colidx
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+    #pragma procedure scache_isolate_assign a, ad, colidx
 #endif
 
     if (rowsize != 16) return EINVAL;
