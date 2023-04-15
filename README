@@ -27,12 +27,27 @@ various options:
    to either 32 or 64 to force the use of 32-bit or 64-bit integers,
    respectively.
 
- - If HAVE_LIBZ is set, then support for reading gzip-compressed
-   Matrix Market files is included. Note that it is necessary to link
-   with libz, e.g., by adding `-lz' to LDFLAGS.
-
  - If HAVE_ALIGNED_ALLOC is set, then memory allocations are aligned
    to a page.
+
+ - If HAVE_LIBZ is set, then support for reading gzip-compressed
+   Matrix Market files is enabled. Note that zlib header files must be
+   available (i.e., an include path for zlib header files may need to
+   be added to CFLAGS), and it is also necessary to link with libz,
+   e.g., by adding `-lz' to LDFLAGS.
+
+ - If HAVE_PAPI is set, then support for hardware performance
+   monitoring using the PAPI library (https://icl.utk.edu/papi/) is
+   enabled. Note that PAPI header files must be available (i.e., the
+   an include path for PAPI header files include may need to be added
+   to CFLAGS), and it is also necessary to make the PAPI header to
+   link to libpapi, e.g., by adding `-lpapi' to LDFLAGS.
+
+   To monitor hardware performance events and obtain performance
+   metrics, an event file must be provided using the option
+   `--papi-event-file'. See papi_util_a64fx_memdp.txt for an example
+   event file for measuring various metrics related to cache- and
+   memory bandwidth utilization on Fujitsu A64FX.
 
  - If USE_A64FX_SECTOR_CACHE is set and the Fujitsu C compiler is
    used, then the sector cache feature of the Fujitsu A64FX processor

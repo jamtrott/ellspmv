@@ -29,6 +29,8 @@
  *
  *  1.5 - 2023-04-15:
  *
+ *   - add support for performance monitoring using PAPI
+ *
  *   - minor fixes to A64FX sector cache configuration
  *
  *  1.4 - 2023-04-01:
@@ -72,6 +74,11 @@
  *
  *   - initial version based on ellspmv.
  */
+
+#ifdef HAVE_PAPI
+#include "papi_util.h"
+#include <papi.h>
+#endif
 
 #include <errno.h>
 
@@ -160,6 +167,12 @@ struct program_options
     int repeat;
     int verbose;
     int quiet;
+#ifdef HAVE_PAPI
+    char * papi_event_file;
+    int papi_event_format;
+    bool papi_event_per_thread;
+    bool papi_event_summary;
+#endif
 };
 
 /**
@@ -184,6 +197,12 @@ static int program_options_init(
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
+#ifdef HAVE_PAPI
+    args->papi_event_file = NULL;
+    args->papi_event_format = 0;
+    args->papi_event_per_thread = false;
+    args->papi_event_summary = false;
+#endif
     return 0;
 }
 
@@ -194,6 +213,9 @@ static int program_options_init(
 static void program_options_free(
     struct program_options * args)
 {
+#ifdef HAVE_PAPI
+    if (args->papi_event_file) free(args->papi_event_file);
+#endif
     if (args->columns_per_thread) free(args->columns_per_thread);
     if (args->rows_per_thread) free(args->rows_per_thread);
     if (args->ypath) free(args->ypath);
@@ -244,6 +266,14 @@ static void program_options_print_help(
     fprintf(f, "  -q, --quiet               do not print Matrix Market output\n");
     fprintf(f, "  -v, --verbose             be more verbose\n");
     fprintf(f, "\n");
+#ifdef HAVE_PAPI
+    fprintf(f, " Options for performance monitoring (PAPI) are:\n");
+    fprintf(f, "  --papi-event-file=FILE    file describing which events to monitor\n");
+    fprintf(f, "  --papi-event-format=FMT   output format for events: plain or csv. [plain]\n");
+    fprintf(f, "  --papi-event-per-thread   display events per thread\n");
+    fprintf(f, "  --papi-event-summary      display summary of performance monitoring\n");
+    fprintf(f, "\n");
+#endif
     fprintf(f, "  -h, --help                display this help and exit\n");
     fprintf(f, "  --version                 display version information and exit\n");
     fprintf(f, "\n");
@@ -258,6 +288,11 @@ static void program_options_print_version(
 {
     fprintf(f, "%s %s\n", program_name, program_version);
     fprintf(f, "row/column offsets: %d-bit\n", sizeof(idx_t)*CHAR_BIT);
+#ifdef HAVE_ALIGNED_ALLOC
+    fprintf(f, "page-aligned allocations: yes (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+#else
+    fprintf(f, "page-aligned allocations: no\n");
+#endif
 #ifdef _OPENMP
     fprintf(f, "OpenMP: yes (%d)\n", _OPENMP);
 #else
@@ -268,10 +303,10 @@ static void program_options_print_version(
 #else
     fprintf(f, "zlib: no\n");
 #endif
-#ifdef HAVE_ALIGNED_ALLOC
-    fprintf(f, "page-aligned allocations: yes (page size: %ld)\n", sysconf(_SC_PAGESIZE));
+#ifdef HAVE_PAPI
+    fprintf(f, "PAPI: yes (%d.%d.%d.%d)\n", PAPI_VERSION_MAJOR(PAPI_VERSION), PAPI_VERSION_MINOR(PAPI_VERSION), PAPI_VERSION_REVISION(PAPI_VERSION), PAPI_VERSION_INCREMENT(PAPI_VERSION));
 #else
-    fprintf(f, "page-aligned allocations: no\n");
+    fprintf(f, "PAPI: no\n");
 #endif
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     fprintf(f, "Fujitsu A64FX sector cache support enabled (L1 ways: ");
@@ -557,6 +592,39 @@ static int parse_program_options(
             args->verbose++;
             (*nargs)++; argv++; continue;
         }
+
+#ifdef HAVE_PAPI
+        if (strstr(argv[0], "--papi-event-file") == argv[0]) {
+            int n = strlen("--papi-event-file");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            free(args->papi_event_file);
+            args->papi_event_file = strdup(s);
+            if (!args->papi_event_file) { program_options_free(args); return errno; }
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--papi-event-format") == argv[0]) {
+            int n = strlen("--papi-event-format");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            if (strcmp(s, "csv") == 0) args->papi_event_format = 1;
+            else if (strcmp(s, "plain") == 0) args->papi_event_format = 0;
+            else { program_options_free(args); return EINVAL; }
+            (*nargs)++; argv++; continue;
+        }
+        if (strcmp(argv[0], "--papi-event-per-thread") == 0) {
+            args->papi_event_per_thread = true;
+            (*nargs)++; argv++; continue;
+        }
+        if (strcmp(argv[0], "--papi-event-summary") == 0) {
+            args->papi_event_summary = true;
+            (*nargs)++; argv++; continue;
+        }
+#endif
 
         /* If requested, print program help text. */
         if (strcmp(argv[0], "-h") == 0 || strcmp(argv[0], "--help") == 0) {
@@ -2056,6 +2124,44 @@ int main(int argc, char *argv[])
         stream_close(streamtype, stream);
     }
 
+#ifdef HAVE_PAPI
+    struct papi_util_opt papi_opt = {
+        .event_file = args.papi_event_file,
+        .print_csv = args.papi_event_format == 1,
+        .print_threads = args.papi_event_per_thread,
+        .print_summary = args.papi_event_summary,
+        .print_region = 0,
+        .component = 0,
+        .multiplex = 0,
+        .output = stderr
+    };
+
+    if (papi_opt.event_file) {
+        fprintf(stderr, "[PAPI util] using event file: %s\n", papi_opt.event_file);
+        int papierr;
+        err = PAPI_UTIL_setup(&papi_opt, &papierr);
+        if (err) {
+            fprintf(stderr, "%s: %s\n",
+                    program_invocation_short_name, PAPI_UTIL_strerror(err, papierr));
+            free(y); free(x);
+            free(endcolumns); free(startcolumns); free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+        err = PAPI_UTIL_start("gemv", &papierr);
+        if (err) {
+            fprintf(stderr, "%s: %s\n",
+                    program_invocation_short_name, PAPI_UTIL_strerror(err, papierr));
+            free(y); free(x);
+            free(endcolumns); free(startcolumns); free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
+    }
+#endif
+
     /* 5. compute the matrix-vector multiplication. */
 #ifdef _OPENMP
     #pragma omp parallel
@@ -2117,6 +2223,14 @@ int main(int argc, char *argv[])
                     (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
         }
     }
+
+#ifdef HAVE_PAPI
+    if (papi_opt.event_file) {
+        PAPI_UTIL_finish();
+        PAPI_UTIL_finalize();
+    }
+#endif
+
     if (err) {
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
         free(y); free(x);
@@ -2132,7 +2246,7 @@ int main(int argc, char *argv[])
     /* 6. write the result vector to a file */
     if (!args.quiet) {
         if (args.verbose > 0) {
-            fprintf(stderr, "mtxfile_write: ");
+            fprintf(stderr, "mtxfile_write:\n");
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
@@ -2141,7 +2255,7 @@ int main(int argc, char *argv[])
         for (idx_t i = 0; i < num_rows; i++) fprintf(stdout, "%.*g\n", DBL_DIG, y[i]);
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
-            fprintf(stderr, "%'.6f seconds\n", timespec_duration(t0, t1));
+            fprintf(stderr, "mtxfile_write done in %'.6f seconds\n", timespec_duration(t0, t1));
         }
     }
 
