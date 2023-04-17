@@ -1346,6 +1346,17 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+#ifdef _OPENMP
+    #pragma omp parallel
+    {
+      /*
+       * This empty parallel section is used to make the OpenMP
+       * runtime output its configuration now if the environment
+       * variable OMP_DISPLAY_ENV is set.
+       */
+    }
+#endif
+
     /* 2. Read the matrix from a Matrix Market file. */
     if (args.verbose > 0) {
         fprintf(stderr, "mtxfile_read: ");
