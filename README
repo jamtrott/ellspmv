@@ -22,10 +22,12 @@ an example:
 Furthermore, the following preprocessor macros can be used to control
 various options:
 
- - If IDXTYPEWIDTH is not set, then values of type `int' are used to
-   index matrix rows and columns. Otherwise, IDXTYPEWIDTH may be set
-   to either 32 or 64 to force the use of 32-bit or 64-bit integers,
-   respectively.
+ - If IDXTYPEWIDTH is set to 32 or 64, then 32-bit or 64-bit integers,
+   respectively, are used for indexing matrix rows and columns.
+   By default, IDXTYPEWIDTH is not set and values of type `int' are
+   used. As a result, the maximum number of matrix rows or columns is
+   typically limited to 2^31-1 or 2 147 483 647 unless 64-bit integers
+   are explicitly requested.
 
  - If HAVE_ALIGNED_ALLOC is set, then memory allocations are aligned
    to a page.
@@ -38,10 +40,10 @@ various options:
 
  - If HAVE_PAPI is set, then support for hardware performance
    monitoring using the PAPI library (https://icl.utk.edu/papi/) is
-   enabled. Note that PAPI header files must be available (i.e., the
-   an include path for PAPI header files include may need to be added
-   to CFLAGS), and it is also necessary to make the PAPI header to
-   link to libpapi, e.g., by adding `-lpapi' to LDFLAGS.
+   enabled. Note that PAPI header files must be available (i.e., an
+   include path for PAPI header files may need to be added to CFLAGS),
+   and it is also necessary to link with libpapi, e.g., by adding
+   `-lpapi' to LDFLAGS.
 
    To monitor hardware performance events and obtain performance
    metrics, an event file must be provided using the option
