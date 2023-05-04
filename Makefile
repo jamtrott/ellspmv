@@ -35,18 +35,21 @@ clean:
 CFLAGS ?= -O2 -g -Wall
 LDFLAGS ?= -lm
 
-csrspmv_c_sources = csrspmv.c papi_util.c
+papi_util.o: papi_util.c papi_util.h
+	$(CC) -c $(CFLAGS) $< -o $@
+
+csrspmv_c_sources = csrspmv.c
 csrspmv_c_headers = papi_util.h
 csrspmv_c_objects := $(foreach x,$(csrspmv_c_sources),$(x:.c=.o))
 $(csrspmv_c_objects): %.o: %.c $(csrspmv_c_headers)
 	$(CC) -c $(CFLAGS) $< -o $@
-$(csrspmv): $(csrspmv_c_objects)
+$(csrspmv): $(csrspmv_c_objects) papi_util.o
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
 
-ellspmv_c_sources = ellspmv.c papi_util.c
+ellspmv_c_sources = ellspmv.c
 ellspmv_c_headers = papi_util.h
 ellspmv_c_objects := $(foreach x,$(ellspmv_c_sources),$(x:.c=.o))
 $(ellspmv_c_objects): %.o: %.c $(ellspmv_c_headers)
 	$(CC) -c $(CFLAGS) $< -o $@
-$(ellspmv): $(ellspmv_c_objects)
+$(ellspmv): $(ellspmv_c_objects) papi_util.o
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
