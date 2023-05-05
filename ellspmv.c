@@ -963,11 +963,6 @@ static int ellgemv(
     const double * __restrict a)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-#ifdef A64FX_SECTOR_CACHE_L1_WAYS
-    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
-#else
-    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
-#endif
     #pragma procedure scache_isolate_assign a, colidx
 #endif
 
@@ -995,11 +990,6 @@ static int ellgemvsd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-#ifdef A64FX_SECTOR_CACHE_L1_WAYS
-    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
-#else
-    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
-#endif
     #pragma procedure scache_isolate_assign a, ad, colidx
 #endif
 
@@ -1027,11 +1017,6 @@ static int ellgemv16sd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-#ifdef A64FX_SECTOR_CACHE_L1_WAYS
-    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
-#else
-    #pragma procedure scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
-#endif
     #pragma procedure scache_isolate_assign a, ad, colidx
 #endif
 
@@ -1578,6 +1563,14 @@ int main(int argc, char *argv[])
     }
 #endif
 
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+#endif
+
     /* 5. compute the matrix-vector multiplication. */
 #ifdef _OPENMP
     #pragma omp parallel
@@ -1626,6 +1619,10 @@ int main(int argc, char *argv[])
                     (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
         }
     }
+
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+    #pragma statement end_scache_isolate_way
+#endif
 
 #ifdef HAVE_PAPI
     if (papi_opt.event_file) {
