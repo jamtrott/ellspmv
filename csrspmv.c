@@ -27,6 +27,11 @@
  *
  * History:
  *
+ *  1.6 - 2023-05-04:
+ *
+ *   - enable A64FX sector cache before the loop that repeatedly
+ *     performs SpMV.
+ *
  *  1.5 - 2023-04-15:
  *
  *   - add support for performance monitoring using PAPI
@@ -130,7 +135,7 @@ typedef int64_t idx_t;
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.5";
+const char * program_version = "1.6";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -308,7 +313,9 @@ static void program_options_print_version(
 #else
     fprintf(f, "PAPI: no\n");
 #endif
-#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#if defined(__FCC_version__)
+    fprintf(f, "Fujitsu compiler version: %s\n", __FCC_version__);
+#if defined(USE_A64FX_SECTOR_CACHE)
     fprintf(f, "Fujitsu A64FX sector cache support enabled (L1 ways: ");
 #ifndef A64FX_SECTOR_CACHE_L1_WAYS
     fprintf(f, "disabled");
@@ -316,6 +323,7 @@ static void program_options_print_version(
     fprintf(f, "%d", A64FX_SECTOR_CACHE_L1_WAYS);
 #endif
     fprintf(f, ", L2 ways: %d)\n", A64FX_SECTOR_CACHE_L2_WAYS);
+#endif
 #endif
     fprintf(f, "\n");
     fprintf(f, "%s\n", program_copyright);

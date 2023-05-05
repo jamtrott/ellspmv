@@ -1,3 +1,8 @@
+2023-05-04  James D. Trotter  <james@simula.no>
+
+	* Merge fix from Sergej to enable A64FX sector cache before the
+	loop that repeatedly performs SpMV.
+
 2023-04-01  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c (csr_from_coo): fix bug in converting symmetric
