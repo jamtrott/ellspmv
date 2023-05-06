@@ -1,3 +1,8 @@
+2023-05-06  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c, ellspmv.c: add option for sorting nonzeros within
+	each row by column
+
 2023-05-04  James D. Trotter  <james@simula.no>
 
 	* Merge fix from Sergej to enable A64FX sector cache before the

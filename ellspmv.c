@@ -27,6 +27,10 @@
  *
  * History:
  *
+ *  1.7 - 2023-05-06:
+ *
+ *   - add an option for sorting nonzeros within each row by column
+ *
  *  1.6 - 2023-05-04:
  *
  *   - enable A64FX sector cache before the loop that repeatedly
@@ -142,6 +146,7 @@ struct program_options
     int gzip;
 #endif
     bool separate_diagonal;
+    bool sort_rows;
     int repeat;
     int verbose;
     int quiet;
@@ -166,6 +171,7 @@ static int program_options_init(
     args->gzip = 0;
 #endif
     args->separate_diagonal = false;
+    args->sort_rows = false;
     args->repeat = 1;
     args->quiet = 0;
     args->verbose = 0;
@@ -225,6 +231,7 @@ static void program_options_print_help(
     fprintf(f, "  -z, --gzip, --gunzip, --ungzip    filter files through gzip\n");
 #endif
     fprintf(f, "  --separate-diagonal  store diagonal nonzeros separately\n");
+    fprintf(f, "  --sort-rows          sort nonzeros by column within each row\n");
     fprintf(f, "  --repeat=N           repeat matrix-vector multiplication N times\n");
     fprintf(f, "  -q, --quiet          do not print Matrix Market output\n");
     fprintf(f, "  -v, --verbose        be more verbose\n");
@@ -250,7 +257,7 @@ static void program_options_print_version(
     FILE * f)
 {
     fprintf(f, "%s %s\n", program_name, program_version);
-    fprintf(f, "row/column offsets: %d-bit\n", sizeof(idx_t)*CHAR_BIT);
+    fprintf(f, "row/column offsets: %ld-bit\n", sizeof(idx_t)*CHAR_BIT);
 #ifdef HAVE_ALIGNED_ALLOC
     fprintf(f, "page-aligned allocations: yes (page size: %ld)\n", sysconf(_SC_PAGESIZE));
 #else
@@ -459,6 +466,10 @@ static int parse_program_options(
     while (*nargs < argc) {
         if (strcmp(argv[0], "--separate-diagonal") == 0) {
             args->separate_diagonal = true;
+            (*nargs)++; argv++; continue;
+        }
+        if (strcmp(argv[0], "--sort-rows") == 0) {
+            args->sort_rows = true;
             (*nargs)++; argv++; continue;
         }
 
@@ -921,6 +932,127 @@ static int ell_from_coo_size(
     return 0;
 }
 
+static int rowsort(
+    idx_t num_rows,
+    idx_t num_columns,
+    int64_t * __restrict rowptr,
+    idx_t rowsizemax,
+    idx_t * __restrict colidx,
+    double * __restrict a)
+{
+    idx_t threshold = 1 << 4;
+
+    /* sort short rows using insertion sort */
+    #pragma omp parallel for
+    for (idx_t i = 0; i < num_rows; i++) {
+        idx_t rowlen = rowptr[i+1]-rowptr[i];
+        if (rowlen > threshold) continue;
+        for (int64_t k = rowptr[i]+1; k < rowptr[i+1]; k++) {
+            idx_t j = colidx[k];
+            double b = a[k];
+            int64_t l = k-1;
+            while (l >= rowptr[i] && colidx[l] > j) {
+                colidx[l+1] = colidx[l];
+                a[l+1] = a[l];
+                l--;
+            }
+            colidx[l+1] = j;
+            a[l+1] = b;
+        }
+    }
+
+    if (rowsizemax <= threshold) return 0;
+
+    /* sort long rows using a hybrid sort that first uses insertion
+     * sort to sort blocks of size 'threshold', and then switches to a
+     * bottom-up merge sort. */
+    idx_t * tmpcolidx = malloc(rowsizemax * sizeof(idx_t));
+    if (!tmpcolidx) return errno;
+    double * tmpa = malloc(rowsizemax * sizeof(double));
+    if (!tmpa) { free(tmpcolidx); return errno; }
+    #pragma omp parallel
+    for (idx_t i = 0; i < num_rows; i++) {
+        idx_t rowlen = rowptr[i+1]-rowptr[i];
+        if (rowlen <= threshold) continue;
+
+        /* #pragma omp single */
+        /* fprintf(stderr, "i=%d, rowlen=%d\n", i, rowlen); */
+
+        idx_t p = threshold;
+        #pragma omp for
+        for (idx_t q = 0; q < rowlen-1; q += p) {
+            idx_t r = q+p < rowlen ? q+p : rowlen;
+            for (int64_t k = q+1; k < r; k++) {
+                idx_t j = colidx[rowptr[i]+k];
+                double b = a[rowptr[i]+k];
+                int64_t l = rowptr[i]+k-1;
+                while (l >= rowptr[i]+q && colidx[l] > j) {
+                    colidx[l+1] = colidx[l];
+                    a[l+1] = a[l];
+                    l--;
+                }
+                colidx[l+1] = j;
+                a[l+1] = b;
+            }
+        }
+
+        for (; p < rowlen; p*=2) {
+            /* fprintf(stderr, "a) t=%d, i=%d, p=%d, rowlen=%d\n", omp_get_thread_num(), i, p, rowlen); */
+
+            #pragma omp for
+            for (idx_t k = 0; k < rowlen; k++) {
+                tmpcolidx[k] = colidx[rowptr[i]+k];
+                tmpa[k] = a[rowptr[i]+k];
+            }
+
+            #pragma omp for
+            for (idx_t q = 0; q < rowlen-1; q += 2*p) {
+                idx_t left = q;
+                idx_t middle = q+p < rowlen ? q+p : rowlen;
+                idx_t right = q+2*p < rowlen ? q+2*p : rowlen;
+
+                /* printf("i=%d: merging [", i); */
+                /* for (idx_t j = left; j < middle; j++) printf(" %d", tmpcolidx[j]); */
+                /* printf("] and ["); */
+                /* for (idx_t j = middle; j < right; j++) printf(" %d", tmpcolidx[j]); */
+                /* printf("] -> "); */
+
+                idx_t u = left, v = left, w = middle;
+                while (v < middle && w < right) {
+                    if (tmpcolidx[v] < tmpcolidx[w]) {
+                        colidx[rowptr[i]+u] = tmpcolidx[v]; a[rowptr[i]+u] = tmpa[v++]; u++;
+                    } else {
+                        colidx[rowptr[i]+u] = tmpcolidx[w]; a[rowptr[i]+u] = tmpa[w++]; u++;
+                    }
+                }
+                while (v < middle) {
+                    colidx[rowptr[i]+u] = tmpcolidx[v]; a[rowptr[i]+u] = tmpa[v++]; u++;
+                }
+                while (w < right) {
+                    colidx[rowptr[i]+u] = tmpcolidx[w]; a[rowptr[i]+u] = tmpa[w++]; u++;
+                }
+
+                /* printf("["); */
+                /* for (idx_t j = left; j < right; j++) printf(" %d", colidx[rowptr[i]+j]); */
+                /* printf("]\n"); */
+            }
+
+            /* fprintf(stderr, "b) t=%d, i=%d, p=%d, rowlen=%d\n", omp_get_thread_num(), i, p, rowlen); */
+        }
+    }
+    free(tmpa); free(tmpcolidx);
+
+#if 0
+    /* verify that rows are sorted */
+    for (idx_t i = 0; i < num_rows; i++) {
+        for (int64_t k = rowptr[i]+1; k < rowptr[i+1]; k++) {
+            if (colidx[k] < colidx[k-1]) return EINVAL;
+        }
+    }
+#endif
+    return 0;
+}
+
 static int ell_from_coo(
     idx_t num_rows,
     idx_t num_columns,
@@ -934,7 +1066,8 @@ static int ell_from_coo(
     idx_t * ellcolidx,
     double * ella,
     double * ellad,
-    bool separate_diagonal)
+    bool separate_diagonal,
+    bool sort_rows)
 {
     for (idx_t i = 0; i <= num_rows; i++) rowptr[i] = 0;
     for (int64_t k = 0; k < num_nonzeros; k++) {
@@ -956,6 +1089,14 @@ static int ell_from_coo(
             ellcolidx[i*rowsize+l] = j;
             ella[i*rowsize+l] = 0.0;
         }
+    }
+
+    /* If requested, sort nonzeros by column within each row */
+    if (sort_rows) {
+        int err = rowsort(
+            num_rows, num_columns,
+            rowptr, rowsize, ellcolidx, ella);
+        if (err) return err;
     }
     return 0;
 }
@@ -1302,7 +1443,7 @@ int main(int argc, char *argv[])
     err = ell_from_coo(
         num_rows, num_columns, num_nonzeros, rowidx, colidx, a,
         rowptr, ellsize, rowsize, ellcolidx, ella, ellad,
-        args.separate_diagonal);
+        args.sort_rows, args.separate_diagonal);
     if (err) {
         if (args.verbose > 0) fprintf(stderr, "\n");
         fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(err));
