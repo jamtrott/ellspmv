@@ -27,7 +27,9 @@
  *
  * History:
  *
- *  1.7 - 2023-05-06:
+ *  1.7 - 2023-05-13:
+ *
+ *   - add options for tuning L1 and L2 hardware prefetching on A64FX.
  *
  *   - add an option for sorting nonzeros within each row by column
  *
@@ -138,8 +140,112 @@ typedef int64_t idx_t;
 #endif
 #endif
 
+/*
+ * setting model-specific registers to control prefetching on A64FX
+ */
+#if defined(__FCC_version__)
+#define print_bits(f, x)                                                \
+    do {                                                                \
+        typeof(x) a__     = (x);                                        \
+        char     *p__     = (char *)&a__ + sizeof(x) - 1;               \
+        size_t    bytes__ = sizeof(x);                                  \
+        printf(#x ": ");                                                \
+        while (bytes__--) {                                             \
+            char bits__ = 8;                                            \
+            while (bits__--)                                            \
+                fputc(*p__ & (1ULL << bits__) ? '1' : '0', (f));        \
+            p__--;                                                      \
+        }                                                               \
+    } while (0)
+
+static const size_t BITS_PER_LONG_LONG = CHAR_BIT * sizeof(long long);
+
+#define ULL(x) x##ULL
+
+#define GENMASK_ULL(h, l)                                                                \
+    (((~ULL(0)) - (ULL(1) << (l)) + 1) & (~ULL(0) >> (BITS_PER_LONG_LONG - 1 - (h))))
+
+#define ARM_READ_MRS(val_u64, reg_name)                                 \
+    __asm__ volatile("mrs %[" #val_u64 "]," #reg_name : [val_u64] "=r"(val_u64) : :);
+
+#define ARM_WRITE_MSR(val_u64, reg_name)                                \
+    __asm__ volatile("msr " #reg_name ",%[" #val_u64 "]" : : [val_u64] "r"(val_u64) :);
+
+// IMP_PF_CTRL_EL1 : S3_0_C11_C4_0
+// set bit 62-63 makes IMP_PF_STREAM_DETECT_CTRL_EL0 accessible from EL0
+
+#define A64FX_ENABLE_PF_CTRL()                                          \
+    {                                                                   \
+        uint64_t val = GENMASK_ULL(63, 62);                             \
+        ARM_WRITE_MSR(val, S3_0_C11_C4_0);                              \
+    }
+
+#define A64FX_DISABLE_PF_CTRL()                                         \
+    {                                                                   \
+        uint64_t val = 0ULL;                                            \
+        ARM_WRITE_MSR(val, S3_0_C11_C4_0);                              \
+    }
+
+// IMP_PF_STREAM_DETECT_CTRL_EL0: S3_3_C11_C4_0
+//
+// [63] V RW
+// 1: A value of IMP_PF_STREAM_DETECT_CTRL_EL0 is valid
+// 0: It operates by a set value of Default.
+//
+// [27:24] L1_DISTRW
+// The distance of the hardware prefetch to L1 cache is specified.
+// The prefetch distance for L1 is calculated as (L1_DIST * 256B).
+// When L1_DIST = 0, the hardware prefetch for L1 operates by the
+// default distance.
+//
+// [19:16] L2_DISTRW
+// The distance of the hardware prefetch to L2 cache is specified.
+// The prefetch distance for L2 is calculated as (L2_DIST * 1KB).
+// When L2_DIST = 0, the hardware prefetch for L2 operates by the
+// default distance.
+
+// read the old value of the register into @val_u64 and
+// set the l1 prefetch distance to @dist
+#define A64FX_SET_PF_DST_L1(val_u64, dist)                                               \
+    {                                                                   \
+        ARM_READ_MRS(val_u64, S3_3_C11_C4_0);                           \
+        uint64_t distu64 = dist;                                        \
+        uint64_t val     = val_u64;                                     \
+        uint64_t mask    = ~GENMASK_ULL(27, 24);                        \
+        val              = val & mask;                                  \
+        val              = val | (distu64 << 24) | (1ULL << 63);        \
+        ARM_WRITE_MSR(val, S3_3_C11_C4_0);                              \
+    }
+
+// read the old value of the register into @val_u64 and
+// set the l2 prefetch distance to @dist
+#define A64FX_SET_PF_DST_L2(val_u64, dist)                              \
+    {                                                                   \
+        ARM_READ_MRS(val_u64, S3_3_C11_C4_0);                           \
+        uint64_t distu64 = dist;                                        \
+        uint64_t val     = val_u64;                                     \
+        uint64_t mask    = ~GENMASK_ULL(19, 16);                        \
+        val              = val & mask;                                  \
+        val              = val | (distu64 << 16) | (1ULL << 63);        \
+        ARM_WRITE_MSR(val, S3_3_C11_C4_0);                              \
+    }
+
+// reads the register value
+#define A64FX_READ_PF_DST(val_u64)                                      \
+    {                                                                   \
+        ARM_READ_MRS(val_u64, S3_3_C11_C4_0);                           \
+    }
+
+// sets the register value
+#define A64FX_WRITE_PF_DST(regval)                                      \
+    {                                                                   \
+        uint64_t val = regval;                                          \
+        ARM_WRITE_MSR(val, S3_3_C11_C4_0);                              \
+    }
+#endif
+
 const char * program_name = "csrspmv";
-const char * program_version = "1.6";
+const char * program_version = "1.7";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -183,6 +289,8 @@ struct program_options
     bool papi_event_per_thread;
     bool papi_event_summary;
 #endif
+    int l1pfdst;
+    int l2pfdst;
 };
 
 /**
@@ -214,6 +322,8 @@ static int program_options_init(
     args->papi_event_per_thread = false;
     args->papi_event_summary = false;
 #endif
+    args->l1pfdst = -1;
+    args->l2pfdst = -1;
     return 0;
 }
 
@@ -284,6 +394,12 @@ static void program_options_print_help(
     fprintf(f, "  --papi-event-format=FMT   output format for events: plain or csv. [plain]\n");
     fprintf(f, "  --papi-event-per-thread   display events per thread\n");
     fprintf(f, "  --papi-event-summary      display summary of performance monitoring\n");
+    fprintf(f, "\n");
+#endif
+#if defined(__FCC_version__)
+    fprintf(f, " Options for A64FX hardware prefetching are:\n");
+    fprintf(f, "  --l1-prefetch-distance=N  set L1 prefetch distance to 256*N bytes for N=1,...,15\n");
+    fprintf(f, "  --l2-prefetch-distance=N  set L2 prefetch distance to N KiB for N=1,...,15\n");
     fprintf(f, "\n");
 #endif
     fprintf(f, "  -h, --help                display this help and exit\n");
@@ -641,6 +757,29 @@ static int parse_program_options(
         }
         if (strcmp(argv[0], "--papi-event-summary") == 0) {
             args->papi_event_summary = true;
+            (*nargs)++; argv++; continue;
+        }
+#endif
+
+#if defined(__FCC_version__)
+        if (strstr(argv[0], "--l1-prefetch-distance") == argv[0]) {
+            int n = strlen("--l1-prefetch-distance");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            err = parse_int(&args->l1pfdst, s, (char **) &s, NULL);
+            if (err || *s != '\0' || args->l1pfdst < 0 || args->l1pfdst > 15) { program_options_free(args); return EINVAL; }
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--l2-prefetch-distance") == argv[0]) {
+            int n = strlen("--l2-prefetch-distance");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            err = parse_int(&args->l2pfdst, s, (char **) &s, NULL);
+            if (err || *s != '\0' || args->l2pfdst < 0 || args->l2pfdst > 15) { program_options_free(args); return EINVAL; }
             (*nargs)++; argv++; continue;
         }
 #endif
@@ -2312,6 +2451,7 @@ int main(int argc, char *argv[])
     }
 #endif
 
+    /* enable A64FX sector cache */
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
 #ifdef A64FX_SECTOR_CACHE_L1_WAYS
     #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
@@ -2323,6 +2463,36 @@ int main(int argc, char *argv[])
     /* 5. compute the matrix-vector multiplication. */
 #ifdef _OPENMP
     #pragma omp parallel
+#endif
+    {
+#if defined(__FCC_version__)
+    uint64_t a64fxpfdst = 0;
+    if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_READ_PF_DST(a64fxpfdst);
+
+    uint64_t tmp = a64fxpfdst;
+    if (args.l1pfdst >= 0) {
+#ifdef _OPENMP
+        #pragma omp master
+#endif
+        if (args.verbose >= 0) fprintf(stderr, "setting L1 prefetch distance to %d\n", args.l1pfdst);
+        A64FX_SET_PF_DST_L1(tmp, args.l1pfdst);
+    }
+    if (args.l2pfdst >= 0) {
+#ifdef _OPENMP
+        #pragma omp master
+#endif
+        if (args.verbose > 0) fprintf(stderr, "setting L2 prefetch distance to %d\n", args.l2pfdst);
+        A64FX_SET_PF_DST_L2(tmp, args.l2pfdst);
+    }
+
+    #pragma omp master
+    if (args.verbose > 0 && (args.l1pfdst >= 0 || args.l2pfdst >= 0)) {
+        A64FX_READ_PF_DST(tmp);
+        fprintf(stderr, "register value: ");
+        print_bits(stderr, tmp);
+        fprintf(stderr, "\n");
+    }
+
 #endif
     for (int repeat = 0; repeat < args.repeat; repeat++) {
 #ifdef _OPENMP
@@ -2380,6 +2550,12 @@ int main(int argc, char *argv[])
                     (double) min_bytes * 1e-9 / (double) timespec_duration(t0, t1),
                     (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
         }
+    }
+
+    /* reset A64FX prefetch distance configuration */
+#if defined(__FCC_version__)
+    if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_WRITE_PF_DST(a64fxpfdst);
+#endif
     }
 
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)

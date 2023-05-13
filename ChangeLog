@@ -1,3 +1,7 @@
+2023-05-13  James D. Trotter  <james@simula.no>
+
+	* Merge Sergej's code for controlling A64FX hardware prefetchers.
+
 2023-05-06  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c, ellspmv.c: add option for sorting nonzeros within

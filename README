@@ -67,6 +67,13 @@ various options:
    which will result in an error if the L2 sector cache is
    unavailable.
 
+ - If the Fujitsu C compiler is used, then it is possible to control
+   the prefetch distance of the L1 and L2 hardware prefetchers with
+   the options --l1-prefetch-distance=N and --l2-prefetch-distance=N.
+   The argument N must be an integer from 0 to 15, which specifies the
+   distance for the L1 or L2 prefetcher as a multiple of 256 bytes or
+   1 KiB, respectively.
+
 
 Usage
 -----
