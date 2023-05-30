@@ -1,3 +1,7 @@
+2023-05-30  James D. Trotter  <james@simula.no>
+
+	* add option for performing warmup iterations
+
 2023-05-13  James D. Trotter  <james@simula.no>
 
 	* Merge Sergej's code for controlling A64FX hardware prefetchers.

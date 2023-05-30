@@ -27,6 +27,10 @@
  *
  * History:
  *
+ *  1.8 - 2023-05-30:
+ *
+ *   - add option for performing warmup iterations
+ *
  *  1.7 - 2023-05-13:
  *
  *   - add options for tuning L1 and L2 hardware prefetching on A64FX.
@@ -245,7 +249,7 @@ static const size_t BITS_PER_LONG_LONG = CHAR_BIT * sizeof(long long);
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.7";
+const char * program_version = "1.8";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -281,6 +285,7 @@ struct program_options
     int columns_per_thread_size;
     idx_t * columns_per_thread;
     int repeat;
+    int warmup;
     int verbose;
     int quiet;
 #ifdef HAVE_PAPI
@@ -314,6 +319,7 @@ static int program_options_init(
     args->columns_per_thread_size = 0;
     args->columns_per_thread = NULL;
     args->repeat = 1;
+    args->warmup = 0;
     args->quiet = 0;
     args->verbose = 0;
 #ifdef HAVE_PAPI
@@ -385,6 +391,7 @@ static void program_options_print_help(
     fprintf(f, "  --columns-per-thread=N..  comma-separated list of number of columns assigned to threads\n");
 #endif
     fprintf(f, "  --repeat=N                repeat matrix-vector multiplication N times\n");
+    fprintf(f, "  --warmup=N                perform N additional warmup iterations\n");
     fprintf(f, "  -q, --quiet               do not print Matrix Market output\n");
     fprintf(f, "  -v, --verbose             be more verbose\n");
     fprintf(f, "\n");
@@ -703,6 +710,16 @@ static int parse_program_options(
             else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
             else { program_options_free(args); return EINVAL; }
             err = parse_int(&args->repeat, s, (char **) &s, NULL);
+            if (err || *s != '\0') { program_options_free(args); return EINVAL; }
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--warmup") == argv[0]) {
+            int n = strlen("--warmup");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            err = parse_int(&args->warmup, s, (char **) &s, NULL);
             if (err || *s != '\0') { program_options_free(args); return EINVAL; }
             (*nargs)++; argv++; continue;
         }
@@ -2413,7 +2430,13 @@ int main(int argc, char *argv[])
         stream_close(streamtype, stream);
     }
 
+    /*
+     * 5. compute the matrix-vector multiplication.
+     */
+
+    /* configure hardware performance monitoring with PAPI */
 #ifdef HAVE_PAPI
+    int papierr = 0;
     struct papi_util_opt papi_opt = {
         .event_file = args.papi_event_file,
         .print_csv = args.papi_event_format == 1,
@@ -2427,18 +2450,7 @@ int main(int argc, char *argv[])
 
     if (papi_opt.event_file) {
         fprintf(stderr, "[PAPI util] using event file: %s\n", papi_opt.event_file);
-        int papierr;
         err = PAPI_UTIL_setup(&papi_opt, &papierr);
-        if (err) {
-            fprintf(stderr, "%s: %s\n",
-                    program_invocation_short_name, PAPI_UTIL_strerror(err, papierr));
-            free(y); free(x);
-            free(endcolumns); free(startcolumns); free(endrows); free(startrows);
-            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
-            program_options_free(&args);
-            return EXIT_FAILURE;
-        }
-        err = PAPI_UTIL_start("gemv", &papierr);
         if (err) {
             fprintf(stderr, "%s: %s\n",
                     program_invocation_short_name, PAPI_UTIL_strerror(err, papierr));
@@ -2455,44 +2467,172 @@ int main(int argc, char *argv[])
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
 #ifdef A64FX_SECTOR_CACHE_L1_WAYS
     #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+    if (args.verbose >= 0) fprintf(stderr, "enabling sector cache (%d L2 ways, %d L1 ways)\n", A64FX_SECTOR_CACHE_L2_WAYS, A64FX_SECTOR_CACHE_L1_WAYS);
 #else
     #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+    if (args.verbose >= 0) fprintf(stderr, "enabling sector cache (%d L2 ways)\n", A64FX_SECTOR_CACHE_L2_WAYS);
 #endif
 #endif
 
-    /* 5. compute the matrix-vector multiplication. */
+    /* configure A64FX prefetch distance */
+#if defined(__FCC_version__)
+    uint64_t * a64fxpfdst;
 #ifdef _OPENMP
     #pragma omp parallel
 #endif
     {
+#ifdef _OPENMP
+        int t = omp_get_thread_num();
+        #pragma omp master
+        a64fxpfdst = malloc(omp_get_num_threads() * sizeof(uint64_t));
+        #pragma omp barrier
+#else
+        int t = 0;
+        a64fxpfdst = malloc(sizeof(uint64_t));
+#endif
+    }
+    if (!a64fxpfdst) {
+        fprintf(stderr, "%s: %s\n", program_invocation_short_name, strerror(errno));
+        free(y); free(x);
+        free(endcolumns); free(startcolumns); free(endrows); free(startrows);
+        free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+        program_options_free(&args);
+        return EXIT_FAILURE;
+    }
+
+#ifdef _OPENMP
+    #pragma omp parallel
+#endif
+    {
+#ifdef _OPENMP
+        int t = omp_get_thread_num();
+#else
+        int t = 0;
+#endif
+
+        uint64_t tmp = 0;
+        if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_READ_PF_DST(tmp);
+        a64fxpfdst[t] = tmp;
+
+        if (args.l1pfdst >= 0) {
+#ifdef _OPENMP
+#pragma omp master
+#endif
+            if (args.verbose >= 0) fprintf(stderr, "setting L1 prefetch distance to %d\n", args.l1pfdst);
+            A64FX_SET_PF_DST_L1(tmp, args.l1pfdst);
+        }
+        if (args.l2pfdst >= 0) {
+#ifdef _OPENMP
+#pragma omp master
+#endif
+            if (args.verbose > 0) fprintf(stderr, "setting L2 prefetch distance to %d\n", args.l2pfdst);
+            A64FX_SET_PF_DST_L2(tmp, args.l2pfdst);
+        }
+
+#pragma omp master
+        if (args.verbose > 0 && (args.l1pfdst >= 0 || args.l2pfdst >= 0)) {
+            A64FX_READ_PF_DST(tmp);
+            fprintf(stderr, "register value: ");
+            print_bits(stderr, tmp);
+            fprintf(stderr, "\n");
+        }
+    }
+#endif
+
+    /* perform warmup iterations */
+#ifdef _OPENMP
+    #pragma omp parallel
+#endif
+    for (int repeat = 0; repeat < args.warmup; repeat++) {
+#ifdef _OPENMP
+        #pragma omp barrier
+        #pragma omp master
+#endif
+        if (args.verbose > 0) {
+            if (args.separate_diagonal) fprintf(stderr, "gemvsd (warmup): ");
+            else fprintf(stderr, "gemv (warmup): ");
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+        }
+#ifdef _OPENMP
+        #pragma omp barrier
+#endif
+
+        int priverr = 0;
+        if (args.partition == partition_rows && !args.rows_per_thread) {
+            if (args.separate_diagonal) {
+                priverr = csrgemvsd(
+                    num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, csrad);
+            } else {
+                priverr = csrgemv(
+                    num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra);
+            }
+        } else if (args.partition == partition_rows) {
+            priverr = csrgemvrp(
+                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,
+                startrows, endrows);
+        } else if (args.partition == partition_nonzeros) {
+            priverr = csrgemvnz(
+                num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,
+                startrows, endrows);
+        }
+
+#ifdef _OPENMP
+        #pragma omp barrier
+        for (int t = 0; t < omp_get_num_threads(); t++) {
+            if (t == omp_get_thread_num() && !err && priverr) err = priverr;
+            #pragma omp barrier
+        }
+#else
+        if (priverr) { err = priverr; }
+#endif
+        if (err) break;
+
+        int64_t num_flops = 2*(csrsize+diagsize);
+        int64_t min_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
+            + (num_rows+1)*sizeof(*csrrowptr) + csrsize*sizeof(*csrcolidx) + csrsize*sizeof(*csra) + diagsize*sizeof(*csrad);
+        int64_t max_bytes = num_rows*sizeof(*y) + csrsize*sizeof(*x)
+            + num_rows*sizeof(*csrrowptr) + csrsize*sizeof(*csrcolidx) + csrsize*sizeof(*csra)
+            + diagsize*sizeof(*csrad) + diagsize*sizeof(*x);
+
+#ifdef _OPENMP
+        #pragma omp barrier
+        #pragma omp master
+#endif
+        if (args.verbose > 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",
+                    timespec_duration(t0, t1),
+                    (double) num_nonzeros * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) num_flops * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) min_bytes * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
+        }
+    }
+
+    /* enable PAPI hardware performance monitoring */
+#ifdef HAVE_PAPI
+    if (papi_opt.event_file) {
+        if (args.verbose > 0)
+            fprintf(stderr, "[PAPI util] start recording events for region \"gemv\"\n");
+        err = PAPI_UTIL_start("gemv", &papierr);
+        if (err) {
+            fprintf(stderr, "%s: %s\n",
+                    program_invocation_short_name, PAPI_UTIL_strerror(err, papierr));
 #if defined(__FCC_version__)
-    uint64_t a64fxpfdst = 0;
-    if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_READ_PF_DST(a64fxpfdst);
-
-    uint64_t tmp = a64fxpfdst;
-    if (args.l1pfdst >= 0) {
-#ifdef _OPENMP
-        #pragma omp master
+            free(a64fxpfdst);
 #endif
-        if (args.verbose >= 0) fprintf(stderr, "setting L1 prefetch distance to %d\n", args.l1pfdst);
-        A64FX_SET_PF_DST_L1(tmp, args.l1pfdst);
+            free(y); free(x);
+            free(endcolumns); free(startcolumns); free(endrows); free(startrows);
+            free(csrad); free(csra); free(csrcolidx); free(csrrowptr);
+            program_options_free(&args);
+            return EXIT_FAILURE;
+        }
     }
-    if (args.l2pfdst >= 0) {
-#ifdef _OPENMP
-        #pragma omp master
 #endif
-        if (args.verbose > 0) fprintf(stderr, "setting L2 prefetch distance to %d\n", args.l2pfdst);
-        A64FX_SET_PF_DST_L2(tmp, args.l2pfdst);
-    }
 
-    #pragma omp master
-    if (args.verbose > 0 && (args.l1pfdst >= 0 || args.l2pfdst >= 0)) {
-        A64FX_READ_PF_DST(tmp);
-        fprintf(stderr, "register value: ");
-        print_bits(stderr, tmp);
-        fprintf(stderr, "\n");
-    }
-
+    /* perform sparse matrix-vector multiplications */
+#ifdef _OPENMP
+    #pragma omp parallel
 #endif
     for (int repeat = 0; repeat < args.repeat; repeat++) {
 #ifdef _OPENMP
@@ -2508,27 +2648,35 @@ int main(int argc, char *argv[])
         #pragma omp barrier
 #endif
 
+        int priverr = 0;
         if (args.partition == partition_rows && !args.rows_per_thread) {
             if (args.separate_diagonal) {
-                err = csrgemvsd(
+                priverr = csrgemvsd(
                     num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, csrad);
-                if (err) break;
             } else {
-                err = csrgemv(
+                priverr = csrgemv(
                     num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra);
-                if (err) break;
             }
         } else if (args.partition == partition_rows) {
-            err = csrgemvrp(
+            priverr = csrgemvrp(
                 num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,
                 startrows, endrows);
-            if (err) break;
         } else if (args.partition == partition_nonzeros) {
-            err = csrgemvnz(
+            priverr = csrgemvnz(
                 num_rows, y, num_columns, x, csrsize, rowsizemin, rowsizemax, csrrowptr, csrcolidx, csra, diagsize, csrad,
                 startrows, endrows);
-            if (err) break;
         }
+
+#ifdef _OPENMP
+        #pragma omp barrier
+        for (int t = 0; t < omp_get_num_threads(); t++) {
+            if (t == omp_get_thread_num() && !err && priverr) err = priverr;
+            #pragma omp barrier
+        }
+#else
+        if (priverr) { err = priverr; }
+#endif
+        if (err) break;
 
         int64_t num_flops = 2*(csrsize+diagsize);
         int64_t min_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
@@ -2554,9 +2702,17 @@ int main(int argc, char *argv[])
 
     /* reset A64FX prefetch distance configuration */
 #if defined(__FCC_version__)
-    if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_WRITE_PF_DST(a64fxpfdst);
-#endif
+#ifdef _OPENMP
+    #pragma omp parallel
+    {
+        int t = omp_get_thread_num();
+        if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_WRITE_PF_DST(a64fxpfdst[t]);
     }
+#else
+    if (args.l1pfdst >= 0 || args.l2pfdst >= 0) A64FX_WRITE_PF_DST(*a64fxpfdst);
+#endif
+    free(a64fxpfdst);
+#endif
 
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
     #pragma statement end_scache_isolate_way
