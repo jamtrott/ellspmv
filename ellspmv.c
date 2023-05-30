@@ -27,6 +27,10 @@
  *
  * History:
  *
+ *  1.8 - 2023-05-30:
+ *
+ *   - add option for performing warmup iterations
+ *
  *  1.7 - 2023-05-06:
  *
  *   - add an option for sorting nonzeros within each row by column
@@ -148,6 +152,7 @@ struct program_options
     bool separate_diagonal;
     bool sort_rows;
     int repeat;
+    int warmup;
     int verbose;
     int quiet;
 #ifdef HAVE_PAPI
@@ -173,6 +178,7 @@ static int program_options_init(
     args->separate_diagonal = false;
     args->sort_rows = false;
     args->repeat = 1;
+    args->warmup = 0;
     args->quiet = 0;
     args->verbose = 0;
 #ifdef HAVE_PAPI
@@ -233,6 +239,7 @@ static void program_options_print_help(
     fprintf(f, "  --separate-diagonal  store diagonal nonzeros separately\n");
     fprintf(f, "  --sort-rows          sort nonzeros by column within each row\n");
     fprintf(f, "  --repeat=N           repeat matrix-vector multiplication N times\n");
+    fprintf(f, "  --warmup=N                perform N additional warmup iterations\n");
     fprintf(f, "  -q, --quiet          do not print Matrix Market output\n");
     fprintf(f, "  -v, --verbose        be more verbose\n");
     fprintf(f, "\n");
@@ -483,6 +490,16 @@ static int parse_program_options(
             err = parse_int(
                 &args->repeat, argv[0] + strlen("--repeat="), NULL, NULL);
             if (err) { program_options_free(args); return err; }
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--warmup") == argv[0]) {
+            int n = strlen("--warmup");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { program_options_free(args); return EINVAL; }
+            err = parse_int(&args->warmup, s, (char **) &s, NULL);
+            if (err || *s != '\0') { program_options_free(args); return EINVAL; }
             (*nargs)++; argv++; continue;
         }
 
@@ -1676,7 +1693,13 @@ int main(int argc, char *argv[])
         stream_close(streamtype, stream);
     }
 
+    /*
+     * 5. compute the matrix-vector multiplication.
+     */
+
+    /* configure hardware performance monitoring with PAPI */
 #ifdef HAVE_PAPI
+    int papierr = 0;
     struct papi_util_opt papi_opt = {
         .event_file = args.papi_event_file,
         .print_csv = args.papi_event_format == 1,
@@ -1690,7 +1713,6 @@ int main(int argc, char *argv[])
 
     if (papi_opt.event_file) {
         fprintf(stderr, "[PAPI util] using event file: %s\n", papi_opt.event_file);
-        int papierr;
         err = PAPI_UTIL_setup(&papi_opt, &papierr);
         if (err) {
             fprintf(stderr, "%s: %s\n",
@@ -1700,6 +1722,81 @@ int main(int argc, char *argv[])
             program_options_free(&args);
             return EXIT_FAILURE;
         }
+    }
+#endif
+
+    /* enable A64FX sector cache */
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#ifdef A64FX_SECTOR_CACHE_L1_WAYS
+    #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
+#else
+    #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
+#endif
+#endif
+
+    /* perform warmup iterations */
+#ifdef _OPENMP
+    #pragma omp parallel
+#endif
+    for (int repeat = 0; repeat < args.warmup; repeat++) {
+        #pragma omp master
+        if (args.verbose > 0) {
+            if (args.separate_diagonal && rowsize == 16) fprintf(stderr, "gemv16sd (warmup): ");
+            else if (args.separate_diagonal) fprintf(stderr, "gemvsd (warmup): ");
+            else fprintf(stderr, "gemv (warmup): ");
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+        }
+
+        int priverr;
+        if (args.separate_diagonal && rowsize == 16) {
+            priverr = ellgemv16sd(
+                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
+        } else if (args.separate_diagonal) {
+            priverr = ellgemvsd(
+                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
+        } else {
+            priverr = ellgemv(
+                num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella);
+        }
+
+#ifdef _OPENMP
+        #pragma omp barrier
+        for (int t = 0; t < omp_get_num_threads(); t++) {
+            if (t == omp_get_thread_num() && !err && priverr) err = priverr;
+            #pragma omp barrier
+        }
+#else
+        if (priverr) { err = priverr; }
+#endif
+        if (err) break;
+
+        int64_t num_flops = 2*(ellsize+diagsize);
+        int64_t min_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
+            + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella) + diagsize*sizeof(*ellad);
+        int64_t max_bytes = num_rows*sizeof(*y) + ellsize*sizeof(*x)
+            + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella)
+            + diagsize*sizeof(*ellad) + diagsize*sizeof(*x);
+
+#ifdef _OPENMP
+        #pragma omp barrier
+        #pragma omp master
+#endif
+        if (args.verbose > 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",
+                    timespec_duration(t0, t1),
+                    (double) num_nonzeros * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) num_flops * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) min_bytes * 1e-9 / (double) timespec_duration(t0, t1),
+                    (double) max_bytes * 1e-9 / (double) timespec_duration(t0, t1));
+        }
+    }
+
+    /* enable PAPI hardware performance monitoring */
+#ifdef HAVE_PAPI
+    if (papi_opt.event_file) {
+        if (args.verbose > 0)
+            fprintf(stderr, "[PAPI util] start recording events for region \"gemv\"\n");
         err = PAPI_UTIL_start("gemv", &papierr);
         if (err) {
             fprintf(stderr, "%s: %s\n",
@@ -1712,15 +1809,7 @@ int main(int argc, char *argv[])
     }
 #endif
 
-#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-#ifdef A64FX_SECTOR_CACHE_L1_WAYS
-    #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS L1=A64FX_SECTOR_CACHE_L1_WAYS
-#else
-    #pragma statement scache_isolate_way L2=A64FX_SECTOR_CACHE_L2_WAYS
-#endif
-#endif
-
-    /* 5. compute the matrix-vector multiplication. */
+    /* perform matrix-vector multiplication */
 #ifdef _OPENMP
     #pragma omp parallel
 #endif
@@ -1733,22 +1822,28 @@ int main(int argc, char *argv[])
             clock_gettime(CLOCK_MONOTONIC, &t0);
         }
 
+        int priverr;
         if (args.separate_diagonal && rowsize == 16) {
-            err = ellgemv16sd(
+            priverr = ellgemv16sd(
                 num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
-            if (err)
-                break;
         } else if (args.separate_diagonal) {
-            err = ellgemvsd(
+            priverr = ellgemvsd(
                 num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella, ellad);
-            if (err)
-                break;
         } else {
-            err = ellgemv(
+            priverr = ellgemv(
                 num_rows, y, num_columns, x, ellsize, rowsize, ellcolidx, ella);
-            if (err)
-                break;
         }
+
+#ifdef _OPENMP
+        #pragma omp barrier
+        for (int t = 0; t < omp_get_num_threads(); t++) {
+            if (t == omp_get_thread_num() && !err && priverr) err = priverr;
+            #pragma omp barrier
+        }
+#else
+        if (priverr) { err = priverr; }
+#endif
+        if (err) break;
 
         int64_t num_flops = 2*(ellsize+diagsize);
         int64_t min_bytes = num_rows*sizeof(*y) + num_columns*sizeof(*x)
@@ -1757,7 +1852,10 @@ int main(int argc, char *argv[])
             + ellsize*sizeof(*ellcolidx) + ellsize*sizeof(*ella)
             + diagsize*sizeof(*ellad) + diagsize*sizeof(*x);
 
+#ifdef _OPENMP
+        #pragma omp barrier
         #pragma omp master
+#endif
         if (args.verbose > 0) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",

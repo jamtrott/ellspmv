@@ -1,3 +1,7 @@
+2023-05-30  James D. Trotter  <james@simula.no>
+
+	* add option for performing warmup iterations
+
 2023-05-18  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c: place 'y' and 'rowptr' in sector 1 when using A64FX sector cache
