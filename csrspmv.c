@@ -27,6 +27,12 @@
  *
  * History:
  *
+ *  1.7b - 2023-05-18:
+ *
+ *   - place output vector and row pointers in sector 1 together with
+ *     matrix nonzeros and column indices when using cache
+ *     partitioning on A64FX.
+ *
  *  1.7 - 2023-05-13:
  *
  *   - add options for tuning L1 and L2 hardware prefetching on A64FX.
@@ -245,7 +251,7 @@ static const size_t BITS_PER_LONG_LONG = CHAR_BIT * sizeof(long long);
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.7";
+const char * program_version = "1.7b";
 const char * program_copyright =
     "Copyright (C) 2023 James D. Trotter";
 const char * program_license =
@@ -1418,7 +1424,7 @@ static int csrgemv(
     const double * __restrict a)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_assign a, colidx
+    #pragma procedure scache_isolate_assign a, colidx, rowptr, y
 #endif
 
 #ifdef _OPENMP
@@ -1447,7 +1453,7 @@ static int csrgemvsd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_assign a, ad, colidx
+    #pragma procedure scache_isolate_assign a, ad, colidx, rowptr, y
 #endif
 
 #ifdef _OPENMP

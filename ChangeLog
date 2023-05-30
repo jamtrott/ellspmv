@@ -1,3 +1,7 @@
+2023-05-18  James D. Trotter  <james@simula.no>
+
+	* csrspmv.c: place 'y' and 'rowptr' in sector 1 when using A64FX sector cache
+
 2023-05-13  James D. Trotter  <james@simula.no>
 
 	* Merge Sergej's code for controlling A64FX hardware prefetchers.
