@@ -105,6 +105,10 @@
 #include <zlib.h>
 #endif
 
+#if defined(__ARM_FEATURE_SVE) && !defined(ARM_NOSVE)
+#include <arm_sve.h>
+#endif
+
 #include <unistd.h>
 
 #include <float.h>
@@ -454,6 +458,11 @@ static void program_options_print_version(
 #endif
     fprintf(f, ", L2 ways: %d)\n", A64FX_SECTOR_CACHE_L2_WAYS);
 #endif
+#endif
+#if defined(__ARM_FEATURE_SVE) && !defined(ARM_NOSVE)
+    fprintf(f, "Arm Aarch64 SVE: yes\n");
+#else
+    fprintf(f, "Arm Aarch64 SVE: no\n");
 #endif
     fprintf(f, "\n");
     fprintf(f, "%s\n", program_copyright);
@@ -1422,6 +1431,90 @@ static int csr_from_coo(
     return 0;
 }
 
+#if defined(__ARM_FEATURE_SVE) && !defined(ARM_NOSVE)
+static int csrgemv(
+    idx_t num_rows,
+    double * __restrict y,
+    idx_t num_columns,
+    const double * __restrict x,
+    int64_t csrsize,
+    idx_t rowsizemin,
+    idx_t rowsizemax,
+    const int64_t * __restrict rowptr,
+    const idx_t * __restrict colidx,
+    const double * __restrict a)
+{
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+    #pragma procedure scache_isolate_assign a
+#endif
+
+#ifdef _OPENMP
+    #pragma omp for simd
+#endif
+    for (idx_t i = 0; i < num_rows; i++) {
+
+        // 2x Modulo Variable Expansion (MVE) accumulator vectors
+        svfloat64_t acc0 = svdup_f64(0.0);
+        svfloat64_t acc1 = svdup_f64(0.0);
+
+        // 2x DP Vector Length per iteration of the inner loop
+        for (int64_t k = rowptr[i]; k < rowptr[i + 1]; k += svcntw()) {
+
+            /* L1 software prefetching */
+            const int SW_PREFETCH_DIST_L1 = 16;
+            svbool_t pg_prf = svwhilelt_b32((int64_t)(k + svcntw() * SW_PREFETCH_DIST_L1), rowptr[num_rows]);
+            // load 16 (2 * svcntd()) colidx values ahead
+            svint32_t cidxv_prf = svld1(pg_prf, &colidx[k + svcntw() * SW_PREFETCH_DIST_L1]);
+            // extend low half into index vectors and prefetch (col0-col7)
+            svprfd_gather_index(svunpklo(pg_prf), x, svunpklo(cidxv_prf), SV_PLDL1KEEP);
+            // extend high half into index vector and prefetch (col8-col15)
+            svprfd_gather_index(svunpkhi(pg_prf), x, svunpkhi(cidxv_prf), SV_PLDL1KEEP);
+
+            svbool_t pg_row = svwhilelt_b32(k, rowptr[i+1]);
+
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+            #pragma statement scache_isolate_assign colidx
+#endif
+
+            svint32_t cidxv = svld1(pg_row, &colidx[k]);
+
+#if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+            #pragma statement end_scache_isolate_assign
+#endif
+
+            // extend low half into index vector (col0-col7)
+            svint64_t cidxvlo = svunpklo(cidxv);
+            // extend high half into index vector (col8-col15)
+            svint64_t cidxvhi = svunpkhi(cidxv);
+
+            // extend low / high half into predicate vectors
+            svbool_t pg_row_lo = svunpklo(pg_row);
+            svbool_t pg_row_hi = svunpkhi(pg_row);
+
+            // load x[col0,...,col7]
+            svfloat64_t xv0 = svld1_gather_index(pg_row_lo, x, cidxvlo);
+            // load x[col8,...,cold15]
+            svfloat64_t xv1 = svld1_gather_index(pg_row_hi, x, cidxvhi);
+
+            // load a[0-7]
+            svfloat64_t av0 = svld1(pg_row_lo, &a[k]);
+            // load a[8-15]
+            svfloat64_t av1 = svld1(pg_row_hi, &a[k + svcntd()]);
+
+            // acc0 <- acc0 + a[0-7] * x[col0,...,col7]
+            acc0 = svmla_m(pg_row_lo, acc0, av0, xv0);
+            // acc1 <- acc1 + a[8-15] * x[col8,...,col15]
+            acc1 = svmla_m(pg_row_hi, acc1, av1, xv1);
+        }
+
+        // Add MVE vectors
+        svfloat64_t acc = svadd_x(svptrue_b64(), acc0, acc1);
+        // reduce a*x into y
+        y[i] = svaddv(svptrue_b64(), acc);
+    }
+    return 0;
+}
+#else
 static int csrgemv(
     idx_t num_rows,
     double * __restrict y,
@@ -1449,6 +1542,7 @@ static int csrgemv(
     }
     return 0;
 }
+#endif
 
 static int csrgemvsd(
     idx_t num_rows,
