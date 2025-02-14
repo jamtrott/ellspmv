@@ -1,7 +1,7 @@
 /*
  * Benchmark program for CSR SpMV
  *
- * Copyright (C) 2023 James D. Trotter
+ * Copyright (C) 2025 James D. Trotter
  *
  * This program is free software: you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -26,6 +26,12 @@
  *
  *
  * History:
+ *
+ *  1.9 - 2025-02-06:
+ *
+ *   - place output vector and row pointers in sector 1 together with
+ *     matrix nonzeros and column indices when using cache
+ *     partitioning on A64FX.
  *
  *  1.8 - 2023-05-30:
  *
@@ -253,9 +259,9 @@ static const size_t BITS_PER_LONG_LONG = CHAR_BIT * sizeof(long long);
 #endif
 
 const char * program_name = "csrspmv";
-const char * program_version = "1.8";
+const char * program_version = "1.9";
 const char * program_copyright =
-    "Copyright (C) 2023 James D. Trotter";
+    "Copyright (C) 2025 James D. Trotter";
 const char * program_license =
     "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>\n"
     "This is free software: you are free to change and redistribute it.\n"
@@ -450,13 +456,15 @@ static void program_options_print_version(
 #if defined(__FCC_version__)
     fprintf(f, "Fujitsu compiler version: %s\n", __FCC_version__);
 #if defined(USE_A64FX_SECTOR_CACHE)
-    fprintf(f, "Fujitsu A64FX sector cache support enabled (L1 ways: ");
+    fprintf(f, "Fujitsu A64FX sector cache: yes (L1 ways: ");
 #ifndef A64FX_SECTOR_CACHE_L1_WAYS
     fprintf(f, "disabled");
 #else
     fprintf(f, "%d", A64FX_SECTOR_CACHE_L1_WAYS);
 #endif
     fprintf(f, ", L2 ways: %d)\n", A64FX_SECTOR_CACHE_L2_WAYS);
+#else
+    fprintf(f, "Fujitsu A64FX sector cache: no\n");
 #endif
 #endif
 #if defined(__ARM_FEATURE_SVE) && !defined(ARM_NOSVE)
@@ -1528,7 +1536,7 @@ static int csrgemv(
     const double * __restrict a)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_assign a, colidx
+    #pragma procedure scache_isolate_assign a, colidx, rowptr, y
 #endif
 
 #ifdef _OPENMP
@@ -1558,7 +1566,7 @@ static int csrgemvsd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
-    #pragma procedure scache_isolate_assign a, ad, colidx
+    #pragma procedure scache_isolate_assign a, ad, colidx, rowptr, y
 #endif
 
 #ifdef _OPENMP
