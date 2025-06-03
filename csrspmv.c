@@ -1474,9 +1474,9 @@ static int csrgemv(
             // load 16 (2 * svcntd()) colidx values ahead
             svint32_t cidxv_prf = svld1(pg_prf, &colidx[k + svcntw() * SW_PREFETCH_DIST_L1]);
             // extend low half into index vectors and prefetch (col0-col7)
-            svprfd_gather_index(svunpklo(pg_prf), x, svunpklo(cidxv_prf), SV_PLDL1KEEP);
+            svprfd_gather_index(svunpklo(pg_prf), (void *) x, svunpklo(cidxv_prf), SV_PLDL1KEEP);
             // extend high half into index vector and prefetch (col8-col15)
-            svprfd_gather_index(svunpkhi(pg_prf), x, svunpkhi(cidxv_prf), SV_PLDL1KEEP);
+            svprfd_gather_index(svunpkhi(pg_prf), (void *) x, svunpkhi(cidxv_prf), SV_PLDL1KEEP);
 
             svbool_t pg_row = svwhilelt_b32(k, rowptr[i+1]);
 
