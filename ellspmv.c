@@ -27,6 +27,14 @@
  *
  * History:
  *
+ *  1.10 - 2025-06-03:
+ *
+ *   - Fix a performancce regression in v1.8 (e78e060e0), where he
+ *     measured performance decreased especially with many threads due
+ *     to an additional OpenMP barrier that was added.  The issue is
+ *     fixed by stopping the timer after the first barrier, thus only
+ *     timing the SpMV kernel
+ *
  *  1.8 - 2023-05-30:
  *
  *   - add option for performing warmup iterations
@@ -128,9 +136,9 @@ typedef int64_t idx_t;
 #endif
 
 const char * program_name = "ellspmv";
-const char * program_version = "1.8";
+const char * program_version = "1.10";
 const char * program_copyright =
-    "Copyright (C) 2023 James D. Trotter";
+    "Copyright (C) 2025 James D. Trotter";
 const char * program_license =
     "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>\n"
     "This is free software: you are free to change and redistribute it.\n"
@@ -1761,6 +1769,7 @@ int main(int argc, char *argv[])
 
 #ifdef _OPENMP
         #pragma omp barrier
+        clock_gettime(CLOCK_MONOTONIC, &t1);
         for (int t = 0; t < omp_get_num_threads(); t++) {
             if (t == omp_get_thread_num() && !err && priverr) err = priverr;
             #pragma omp barrier
@@ -1782,7 +1791,6 @@ int main(int argc, char *argv[])
         #pragma omp master
 #endif
         if (args.verbose > 0) {
-            clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",
                     timespec_duration(t0, t1),
                     (double) num_nonzeros * 1e-9 / (double) timespec_duration(t0, t1),
@@ -1836,6 +1844,7 @@ int main(int argc, char *argv[])
 
 #ifdef _OPENMP
         #pragma omp barrier
+        clock_gettime(CLOCK_MONOTONIC, &t1);
         for (int t = 0; t < omp_get_num_threads(); t++) {
             if (t == omp_get_thread_num() && !err && priverr) err = priverr;
             #pragma omp barrier
@@ -1857,7 +1866,6 @@ int main(int argc, char *argv[])
         #pragma omp master
 #endif
         if (args.verbose > 0) {
-            clock_gettime(CLOCK_MONOTONIC, &t1);
             fprintf(stderr, "%'.6f seconds (%'.3f Gnz/s, %'.3f Gflop/s, %'.1f to %'.1f GB/s)\n",
                     timespec_duration(t0, t1),
                     (double) num_nonzeros * 1e-9 / (double) timespec_duration(t0, t1),

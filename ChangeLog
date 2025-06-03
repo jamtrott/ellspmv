@@ -1,3 +1,11 @@
+2025-06-04  k27007  <james@simula.no>
+
+	* csrspmv.c: Fix a performancce regression in v1.8 (e78e060e0),
+	where he measured performance decreased especially with many
+	threads due to an additional OpenMP barrier that was added.  The
+	issue is fixed by stopping the timer after the first barrier, thus
+	only timing the SpMV kernel
+
 2025-02-06  James D. Trotter  <james@simula.no>
 
 	* csrspmv.c: place 'y' and 'rowptr' in sector 1 when using A64FX sector cache
