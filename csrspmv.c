@@ -27,7 +27,16 @@
  *
  * History:
  *
- *  1.10 - 2025-06-03:
+ *  1.10 - 2025-06-06:
+ *
+ *   - Add a compile-time option to set the cache partitioning policy.
+ *     If A64FX_SECTOR_CACHE_POLICY is set to 1, then only the input
+ *     vector x is placed in the non-temporal sector (i.e., sector 1).
+ *     If A64FX_SECTOR_CACHE_POLICY is set to 2, then the input vector
+ *     x, the output vector y and the row pointers are placed in the
+ *     non-temporal sector.
+ *
+ *     By default, A64FX_SECTOR_CACHE_POLICY is set to 1.
  *
  *   - Fix a performancce regression in v1.8 (e78e060e0), where he
  *     measured performance decreased especially with many threads due
@@ -156,9 +165,15 @@ typedef int64_t idx_t;
 #define parse_idx_t parse_int64_t
 #endif
 
+#define ISOLATE_X 1
+#define ISOLATE_X_Y_ROWPTR 2
+
 #ifdef USE_A64FX_SECTOR_CACHE
 #ifndef A64FX_SECTOR_CACHE_L2_WAYS
 #define A64FX_SECTOR_CACHE_L2_WAYS 4
+#endif
+#ifndef A64FX_SECTOR_CACHE_POLICY
+#define A64FX_SECTOR_CACHE_POLICY ISOLATE_X
 #endif
 #endif
 
@@ -470,7 +485,14 @@ static void program_options_print_version(
 #else
     fprintf(f, "%d", A64FX_SECTOR_CACHE_L1_WAYS);
 #endif
-    fprintf(f, ", L2 ways: %d)\n", A64FX_SECTOR_CACHE_L2_WAYS);
+    fprintf(f, ", L2 ways: %d", A64FX_SECTOR_CACHE_L2_WAYS);
+#if A64FX_SECTOR_CACHE_POLICY == ISOLATE_X
+    fprintf(f, ", policy: X)\n");
+#elif A64FX_SECTOR_CACHE_POLICY == ISOLATE_X_Y_ROWPTR
+    fprintf(f, ", policy: X+Y+ROWPTR)\n");
+#else
+    fprintf(f, ", policy: none)\n");
+#endif
 #else
     fprintf(f, "Fujitsu A64FX sector cache: no\n");
 #endif
@@ -1461,7 +1483,11 @@ static int csrgemv(
     const double * __restrict a)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#if A64FX_SECTOR_CACHE_POLICY == ISOLATE_X
+    #pragma procedure scache_isolate_assign a, rowptr, y
+#elif A64FX_SECTOR_CACHE_POLICY == ISOLATE_X_Y_ROWPTR
     #pragma procedure scache_isolate_assign a
+#endif
 #endif
 
 #ifdef _OPENMP
@@ -1544,7 +1570,13 @@ static int csrgemv(
     const double * __restrict a)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#if A64FX_SECTOR_CACHE_POLICY == ISOLATE_X
     #pragma procedure scache_isolate_assign a, colidx, rowptr, y
+#elif A64FX_SECTOR_CACHE_POLICY == ISOLATE_X_Y_ROWPTR
+    #pragma procedure scache_isolate_assign a, colidx
+#endif
+#endif
+
 #endif
 
 #ifdef _OPENMP
@@ -1574,7 +1606,11 @@ static int csrgemvsd(
     const double * __restrict ad)
 {
 #if defined(__FCC_version__) && defined(USE_A64FX_SECTOR_CACHE)
+#if A64FX_SECTOR_CACHE_POLICY == ISOLATE_X
     #pragma procedure scache_isolate_assign a, ad, colidx, rowptr, y
+#elif A64FX_SECTOR_CACHE_POLICY == ISOLATE_X_Y_ROWPTR
+    #pragma procedure scache_isolate_assign a, ad, colidx
+#endif
 #endif
 
 #ifdef _OPENMP

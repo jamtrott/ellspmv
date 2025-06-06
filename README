@@ -61,6 +61,13 @@ various options:
    and the L1 cache partitioning is not used, whereas
    A64FX_SECTOR_CACHE_L2_WAYS defaults to 4 out of 16 ways.
 
+   The partitioning policy can be set with A64FX_SECTOR_CACHE_POLICY.
+   If it is set to 1, then only the input vector x is placed in the
+   non-temporal sector (i.e., sector 1).  If A64FX_SECTOR_CACHE_POLICY
+   is set to 2, then the input vector x, the output vector y and the
+   row pointers are placed in the non-temporal sector.  By default,
+   A64FX_SECTOR_CACHE_POLICY is set to 1.
+
    To use the sector cache feature, it is also necessary to set the
    environment variables FLIB_HPCFUNC=TRUE and FLIB_SCCR_CNTL=TRUE at
    runtime. It is also recommended to set FLIB_L1_SCCR_CNTL=FALSE,
