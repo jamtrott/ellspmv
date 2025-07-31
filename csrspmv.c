@@ -27,6 +27,11 @@
  *
  * History:
  *
+ *  1.11 - 2025-07-31:
+ *
+ *   - Print the number of rows and nonzeros per thread, if verbose
+ *     output is enabled.
+ *
  *  1.10 - 2025-06-06:
  *
  *   - Add a compile-time option to set the cache partitioning policy.
@@ -2279,6 +2284,57 @@ int main(int argc, char *argv[])
                 min_nonzeros_per_thread, max_nonzeros_per_thread);
 #endif
         fputc('\n', stderr);
+    }
+
+    /* print per-thread workloads */
+    if (args.verbose > 1) {
+#ifdef _OPENMP
+        int nthreads;
+        #pragma omp parallel
+        #pragma omp master
+        { nthreads = omp_get_num_threads(); }
+
+        if (args.partition == partition_rows && !args.rows_per_thread) {
+            idx_t startrow = 0;
+            for (int p = 0; p < nthreads; p++) {
+                idx_t num_rows_per_thread = num_rows/nthreads + (p < (num_rows % nthreads));
+                idx_t endrow = startrow + num_rows_per_thread;
+                int64_t num_nonzeros = 0;
+                for (int i = startrow; i < endrow; i++)
+                    num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
+                fprintf(stderr, "thread %'d: %"PRIdx" rows %'"PRId64" nonzeros\n",
+                        p, num_rows_per_thread, num_nonzeros);
+                startrow += num_rows_per_thread;
+            }
+        } else if (args.partition == partition_rows) {
+            for (int p = 0; p < nthreads; p++) {
+                idx_t startrow = startrows[p];
+                idx_t endrow = endrows[p];
+                idx_t num_rows_per_thread = endrow - startrow;
+                int64_t num_nonzeros = 0;
+                for (idx_t i = startrow; i < endrow; i++)
+                    num_nonzeros += csrrowptr[i+1]-csrrowptr[i] + (diagsize > 0 ? 1 : 0);
+                fprintf(stderr, "thread %'d: %"PRIdx" rows %'"PRId64" nonzeros\n",
+                        p, num_rows_per_thread, num_nonzeros);
+            }
+        } else if (args.partition == partition_nonzeros) {
+            for (int p = 0; p < nthreads; p++) {
+                int64_t startnz = p*(csrsize+nthreads-1)/nthreads;
+                int64_t endnz = (p+1)*(csrsize+nthreads-1)/nthreads;
+                if (endnz > csrsize) endnz = csrsize;
+                idx_t startrow = 0;
+                if (startrows) { startrow = startrows[p]; }
+                else { while (startrow < num_rows && startnz > csrrowptr[startrow+1]) startrow++; }
+                idx_t endrow = startrow;
+                if (endrows) { endrow = endrows[p]; }
+                else { while (endrow < num_rows && endnz-1 > csrrowptr[endrow+1]) endrow++; }
+                idx_t num_rows_per_thread = endrow - startrow;
+                int64_t num_nonzeros = csrsize/nthreads + (p < (csrsize % nthreads));
+                fprintf(stderr, "thread %'d: %"PRIdx" rows %'"PRId64" nonzeros\n",
+                        p, num_rows_per_thread, num_nonzeros);
+            }
+        }
+#endif
     }
 
     /* 4. allocate vectors */

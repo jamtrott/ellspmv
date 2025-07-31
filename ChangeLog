@@ -1,3 +1,8 @@
+2025-07-31  k27007  <james@simula.no>
+
+	* csrspmv.c: Print the number of rows and nonzeros per thread, if verbose
+	output is enabled.
+
 2025-06-04  k27007  <james@simula.no>
 
 	* csrspmv.c: Fix a performancce regression in v1.8 (e78e060e0),
