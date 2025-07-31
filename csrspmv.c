@@ -1577,8 +1577,6 @@ static int csrgemv(
 #endif
 #endif
 
-#endif
-
 #ifdef _OPENMP
     #pragma omp for simd
 #endif
